@@ -26,17 +26,17 @@ After evaluating various WAL implementations (RocksDB, LevelDB, SQLite, PostgreS
 2. **No Total Length Field**: Redundant since `Total_Length = 21 + Key_Size + Value_Size`. This saves 4 bytes per record.
 
 3. **Integrity Checking**: After evaluating various algorithms (CRC32, CRC32C, xxHash3), we chose **CRC32C with SSE4.2 hardware acceleration** for optimal performance on modern Intel/AMD CPUs:
-   - 3-5x faster than software CRC32, can achieve 3.3+ GB/s
-   - Uses SSE4.2 `crc32` instruction available on all modern Intel/AMD CPUs (2010+)
-   - Minimal implementation (~50 lines) with zero external dependencies
-   - Compact 4-byte checksum (vs 8-byte for XXH3)
-   - Proven in production (ext4, Btrfs, PostgreSQL)
-   - Each record is independently validated
-   - EstimatedPerformance Comparison (Benchmarks on modern Intel/AMD CPUs)
-     - **CRC32C (SSE4.2)**: ~3.3 GB/s, 3 cycles latency, 1 cycle throughput
-     - **XXH3**: ~4 GB/s but requires larger implementation
-     - **Software CRC32**: ~1 GB/s
-     - **CRC32C vs XXH3**: 3-5x faster than software CRC32, competitive with XXH3 while being simpler to implement
+    - 3-5x faster than software CRC32, can achieve 3.3+ GB/s
+    - Uses SSE4.2 `crc32` instruction available on all modern Intel/AMD CPUs (2010+)
+    - Minimal implementation (~50 lines) with zero external dependencies
+    - Compact 4-byte checksum (vs 8-byte for XXH3)
+    - Proven in production (ext4, Btrfs, PostgreSQL)
+    - Each record is independently validated
+    - EstimatedPerformance Comparison (Benchmarks on modern Intel/AMD CPUs)
+        - **CRC32C (SSE4.2)**: ~3.3 GB/s, 3 cycles latency, 1 cycle throughput
+        - **XXH3**: ~4 GB/s but requires larger implementation
+        - **Software CRC32**: ~1 GB/s
+        - **CRC32C vs XXH3**: 3-5x faster than software CRC32, competitive with XXH3 while being simpler to implement
 
 4. **Version Field**: Enables non-backward-compatible changes and handling different format versions.
 
@@ -50,6 +50,3 @@ After evaluating various WAL implementations (RocksDB, LevelDB, SQLite, PostgreS
 - Skip corrupted records (CRC32C mismatch) and continue
 - Use file position for ordering
 - Replay all valid records in sequence
-
-
-

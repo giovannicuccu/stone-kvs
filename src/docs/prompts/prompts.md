@@ -67,3 +67,38 @@ If the code of this project will runo only on modern Intel/AMD CPU what is the b
 ```
 please update CLAUDE.MD with the last decision
 ```
+
+## CRC32C Table Implementation Request
+```
+please add a new implmentation of crc32c in the corresponding file. the new implementation is a table based one and must process one byte a time instead of one bit at a time. Write the tests using the same data for the current implementation.
+```
+
+## CRC32C Table Benchmark Request
+```
+now please add a benchmark for the new table based implementation
+```
+
+## CRC32C Code Refactoring Request
+```
+can you refactor the new crc32c code and define only one the polynomial and extract the crc32_table variable out of the crc32c_table method?
+```
+
+## CRC32C Comment Format Question
+```
+why did you proposed the change to the comment in the file?
+```
+
+## CRC32C Idiomatic Rust Question
+```
+is it possible to write the generate_crc32_table in more idiomatic rust avoiding the while?
+```
+
+## Main.md Review Request
+```
+please review the mian.dm file and look for typos or syntax errors or unnatural english expressions
+```
+
+## Commit Changes Request
+```
+please commit all the changes
+```
