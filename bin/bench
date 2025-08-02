@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# Benchmark runner script
+# Usage: ./bin/bench <benchmark-name>
+# Example: ./bin/bench crc32c_bench
+
+set -e
+
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <benchmark-name>"
+    echo "Available benchmarks:"
+    find benches -name "*.rs" -exec basename {} .rs \;
+    exit 1
+fi
+
+BENCH_NAME="$1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+echo "Building benchmark: $BENCH_NAME"
+
+# Build the benchmark binary
+cargo criterion --bench "$BENCH_NAME" --no-run
+
+# Find the correct executable
+# Strategy 1: Find by name pattern and modification time (most recent)
+TARGET_DIR="$PROJECT_ROOT/target/release/deps"
+
+if [ ! -d "$TARGET_DIR" ]; then
+    echo "Error: Target directory not found: $TARGET_DIR"
+    exit 1
+fi
+
+# Find executables matching the bench name pattern
+CANDIDATES=$(find "$TARGET_DIR" -name "${BENCH_NAME}-*" -type f -executable 2>/dev/null | head -10)
+
+if [ -z "$CANDIDATES" ]; then
+    echo "Error: No executable found matching pattern: ${BENCH_NAME}-*"
+    echo "Available executables in $TARGET_DIR:"
+    find "$TARGET_DIR" -type f -executable -name "*bench*" 2>/dev/null | head -5
+    exit 1
+fi
+
+# Strategy 2: Get the most recently modified executable
+EXECUTABLE=$(echo "$CANDIDATES" | xargs ls -t | head -1)
+
+if [ -z "$EXECUTABLE" ]; then
+    echo "Error: Could not determine the correct executable"
+    exit 1
+fi
+
+echo "Found executable: $EXECUTABLE"
+echo "Running benchmark with runperf..."
+
+# Use the existing runperf script
+"$SCRIPT_DIR/runperf" "$EXECUTABLE" --bench
