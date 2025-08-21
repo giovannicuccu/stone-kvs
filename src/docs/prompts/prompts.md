@@ -127,3 +127,18 @@ did you save the prompts I gave you?
 ```
 the next step is to create a new function that computes crc32c but the implementation must be able to process 8 bytes at a time using more than one table. the function interface is the same of the other one and also the tests are the same
 ```
+
+## CRC32C Slice8 Refactoring Request
+```
+I'd like to refactor crc32c_slice8, I'd like to process the data using the chunk function available from slice. the logic is always the same
+```
+
+## CRC32C Slice8 Inline Refactoring Request
+```
+the next fractor to the same method is ot inline the content of crc_bytes using crc directly and decomposing chink in bytes as you did for crc_bytes
+```
+
+## Commit Changes Request
+```
+please commit the changes
+```
