@@ -83,3 +83,73 @@ pub fn crc32c_table(data: &[u8]) -> u32 {
 
     !crc
 }
+
+/// Generate 8 CRC32C lookup tables for slicing-by-8 implementation
+const fn generate_crc32c_tables_8() -> [[u32; 256]; 8] {
+    let mut tables = [[0u32; 256]; 8];
+    
+    // First table is the standard CRC32C table
+    tables[0] = generate_crc32c_table();
+    
+    // Generate remaining 7 tables
+    let mut table_idx = 1;
+    while table_idx < 8 {
+        let mut i = 0;
+        while i < 256 {
+            let mut crc = tables[table_idx - 1][i];
+            crc = tables[0][(crc & 0xff) as usize] ^ (crc >> 8);
+            tables[table_idx][i] = crc;
+            i += 1;
+        }
+        table_idx += 1;
+    }
+    
+    tables
+}
+
+// Pre-computed 8 CRC32C lookup tables for slicing-by-8
+const CRC32C_TABLES_8: [[u32; 256]; 8] = generate_crc32c_tables_8();
+
+/// CRC32C implementation using slicing-by-8 technique
+/// Processes 8 bytes at a time using 8 lookup tables for better performance
+pub fn crc32c_slice8(data: &[u8]) -> u32 {
+    let mut crc = 0xffffffff;
+    let mut i = 0;
+    
+    // Process 8 bytes at a time
+    while i + 8 <= data.len() {
+        // Read 8 bytes as u64 (little-endian)
+        let chunk = [
+            data[i], data[i + 1], data[i + 2], data[i + 3],
+            data[i + 4], data[i + 5], data[i + 6], data[i + 7]
+        ];
+        
+        // XOR the first 4 bytes with current CRC
+        let crc_bytes = [
+            (crc & 0xff) as u8,
+            ((crc >> 8) & 0xff) as u8,
+            ((crc >> 16) & 0xff) as u8,
+            ((crc >> 24) & 0xff) as u8,
+        ];
+        
+        // Calculate new CRC using all 8 tables
+        crc = CRC32C_TABLES_8[7][(chunk[0] ^ crc_bytes[0]) as usize]
+            ^ CRC32C_TABLES_8[6][(chunk[1] ^ crc_bytes[1]) as usize]
+            ^ CRC32C_TABLES_8[5][(chunk[2] ^ crc_bytes[2]) as usize]
+            ^ CRC32C_TABLES_8[4][(chunk[3] ^ crc_bytes[3]) as usize]
+            ^ CRC32C_TABLES_8[3][chunk[4] as usize]
+            ^ CRC32C_TABLES_8[2][chunk[5] as usize]
+            ^ CRC32C_TABLES_8[1][chunk[6] as usize]
+            ^ CRC32C_TABLES_8[0][chunk[7] as usize];
+            
+        i += 8;
+    }
+    
+    // Process remaining bytes using single-byte method
+    while i < data.len() {
+        crc = (crc >> 8) ^ CRC32C_TABLE[((crc as u8) ^ data[i]) as usize];
+        i += 1;
+    }
+    
+    !crc
+}

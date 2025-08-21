@@ -102,3 +102,28 @@ please review the mian.dm file and look for typos or syntax errors or unnatural 
 ```
 please commit all the changes
 ```
+
+## runperf Script CPU Flexibility Request
+```
+the script runperf is built for Intel CPU is it possible to make it more flexible adding support for AMD CPUs? if yes please do it in a way theat supports all types of CPU DO NOT delete the current intel cpu support
+```
+
+## runperf Script Test Confirmation
+```
+it works, thanks
+```
+
+## CLAUDE.md Reading Confirmation Question
+```
+did you read the claude.md file before starting this session?
+```
+
+## Prompt Saving Question
+```
+did you save the prompts I gave you?
+```
+
+## CRC32C 8-byte Processing Implementation Request
+```
+the next step is to create a new function that computes crc32c but the implementation must be able to process 8 bytes at a time using more than one table. the function interface is the same of the other one and also the tests are the same
+```

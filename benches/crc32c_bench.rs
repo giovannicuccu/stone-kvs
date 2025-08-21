@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use stone_kvs::wal::crc32c::{crc32c, crc32c_table};
+use stone_kvs::wal::crc32c::{crc32c, crc32c_table, crc32c_slice8};
 
 fn bench_crc32c(c: &mut Criterion) {
     let mut group = c.benchmark_group("crc32c");
@@ -49,6 +49,15 @@ fn bench_crc32c(c: &mut Criterion) {
                 &data,
                 |b, data| {
                     b.iter(|| crc32c_table(data));
+                },
+            );
+            
+            // Benchmark slice8 implementation
+            group.bench_with_input(
+                BenchmarkId::new("slice8", &bench_name),
+                &data,
+                |b, data| {
+                    b.iter(|| crc32c_slice8(data));
                 },
             );
         });

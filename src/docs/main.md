@@ -12,6 +12,10 @@ There is a script to run the benchmarks `bin/bench` that automates the process. 
 ```bash
 ./bin/bench <bench-name>
 ```
+for example
+```bash
+./bin/bench crc32c_bench
+```
 and you're done.
 
 ## CRC32C
