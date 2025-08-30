@@ -131,8 +131,10 @@ echo 0 | sudo tee /sys/devices/system/cpu/cpu5/online > /dev/null
 #  . on our reserved CPUs so it doesn't migrate
 #  . re-niced so it doesn't get context switched
 #
-
-taskset -c 0,1 sudo nice -n -5 runuser -u $USERNAME -- $@
+echo "params full $@"
+ORIGINAL_USER=${SUDO_USER:-$USER}
+#taskset -c 0,1 sudo nice -n -5 runuser -u $USERNAME -- "$1" "${@:2}"
+taskset -c 0,1 sudo nice -n -5 runuser -u $ORIGINAL_USER -- $@
 
 # Monitor cpu-migrations and context-switches. They should both be 0. perf must come before nice to make the benchmark higher priority.
 #taskset -c 0,1 perf stat -e context-switches,cpu-migrations sudo nice -n -5 $@

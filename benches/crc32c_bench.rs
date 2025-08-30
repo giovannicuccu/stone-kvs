@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use stone_kvs::wal::crc32c::{crc32c, crc32c_table, crc32c_slice8};
+use stone_kvs::wal::crc32c::{crc32c, crc32c_table, crc32c_slice8, crc32c_hw, crc32c_slice32, crc32c_slice16, crc32c_slice16_bt};
 
 fn bench_crc32c(c: &mut Criterion) {
     let mut group = c.benchmark_group("crc32c");
@@ -36,7 +36,7 @@ fn bench_crc32c(c: &mut Criterion) {
             
             // Benchmark bit-by-bit implementation
             group.bench_with_input(
-                BenchmarkId::new("bit_by_bit", &bench_name),
+                BenchmarkId::new("bit", &bench_name),
                 &data,
                 |b, data| {
                     b.iter(|| crc32c(data));
@@ -45,19 +45,56 @@ fn bench_crc32c(c: &mut Criterion) {
             
             // Benchmark table-based implementation
             group.bench_with_input(
-                BenchmarkId::new("table_based", &bench_name),
+                BenchmarkId::new("byte", &bench_name),
                 &data,
                 |b, data| {
                     b.iter(|| crc32c_table(data));
                 },
             );
-            
+
             // Benchmark slice8 implementation
             group.bench_with_input(
-                BenchmarkId::new("slice8", &bench_name),
+                BenchmarkId::new("8_bytes", &bench_name),
                 &data,
                 |b, data| {
                     b.iter(|| crc32c_slice8(data));
+                },
+            );
+            
+            // Benchmark slice16 implementation
+            group.bench_with_input(
+                BenchmarkId::new("16_bytes", &bench_name),
+                &data,
+                |b, data| {
+                    b.iter(|| crc32c_slice16(data));
+                },
+            );
+
+            // Benchmark slice32 implementation
+            group.bench_with_input(
+                BenchmarkId::new("16_bytes_bt", &bench_name),
+                &data,
+                |b, data| {
+                    b.iter(|| crc32c_slice16_bt(data));
+                },
+            );
+            
+            // Benchmark slice32 implementation
+            group.bench_with_input(
+                BenchmarkId::new("32_byte", &bench_name),
+                &data,
+                |b, data| {
+                    b.iter(|| crc32c_slice32(data));
+                },
+            );
+            
+            // Benchmark hardware implementation (only on supported architectures)
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+            group.bench_with_input(
+                BenchmarkId::new("hardware", &bench_name),
+                &data,
+                |b, data| {
+                    b.iter(|| crc32c_hw(data));
                 },
             );
         });

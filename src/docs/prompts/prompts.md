@@ -142,3 +142,63 @@ the next fractor to the same method is ot inline the content of crc_bytes using 
 ```
 please commit the changes
 ```
+
+## CRC32C Byte Extraction Inline Question
+```
+in @src/wal/crc32c.rs method crc32_slice8 is it possibile to extract the 8 bytes directly in the for expression line?
+```
+
+## CLAUDE.md Reading Question
+```
+did you read the CLAUDE.MD file?
+```
+
+## Session Instructions Question
+```
+Is there a way to tell you that you must save automatically the prompt without asking for it every session?
+```
+
+## Session Start Instructions Question
+```
+You seem to forgot the instruction when I start a new session
+```
+
+## CLAUDE.md Update Instructions Question
+```
+How can I instruct you to do so?
+```
+
+## CLAUDE.md Self-Update Confirmation
+```
+No I dit it by myself
+```
+
+## Hardware Implementation Request
+```
+yes please go on with a multi byte version, include bot x86 and arm versions if you can.
+```
+
+## Hardware Implementation Alignment Request
+```
+in the x86 version and event in arm version try to use an instruction like let (prefix, u64s, suffix) = buf.align_to::<u64>(); to get the data for hw processing
+```
+
+## Hardware Test Conditional Execution Request
+```
+can you condition the test execution on the hw support of the machine running th tests?
+```
+
+## Hardware Test Implementation Clarification
+```
+I'm puzzled, It seems that you did not add any tests, is it possibile to add the tests for hardware implementation and execute only if the machine that runs the supports the cpu instructions? somethinh like you did for crc32hw method the test method shoud be executed if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] or #[cfg(target_arch = "aarch64")] is true
+```
+
+## Next Task Request
+```
+please go on with the next task
+```
+
+## Next Task Request (16-byte implementation)
+```
+please go on with the next task
+```
