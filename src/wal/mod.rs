@@ -13,12 +13,29 @@ impl WalConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct Wal {
     config: WalConfig,
 }
 
 impl Wal {
     pub fn open(config: WalConfig) -> Result<Self, WalError> {
+        if !config.path.exists() {
+            return Err(WalError::InvalidConfig(format!(
+                "Directory does not exist: {}, check your configuration/file permissions.",
+                config.path.display()
+            )));
+        }
+        
+        let wal_dir = config.path.join("wal");
+        std::fs::create_dir_all(&wal_dir).map_err(|e| {
+            WalError::InvalidConfig(format!(
+                "Failed to create WAL directory {}: {}",
+                wal_dir.display(),
+                e
+            ))
+        })?;
+        
         Ok(Self { config })
     }
 }
