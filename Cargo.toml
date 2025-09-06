@@ -8,6 +8,7 @@ bytes = "1.10.1"
 
 [dev-dependencies]
 criterion = "0.5"
+tempfile = "3.21.0"
 
 [[bench]]
 name = "crc32c_bench"

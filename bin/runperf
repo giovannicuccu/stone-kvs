@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# this is a copy of https://gist.github.com/grahamking/9c8c91b871843a9a6ce2bec428b8f48d
-# I save here for convenience
+# this is a modified copy of https://gist.github.com/grahamking/9c8c91b871843a9a6ce2bec428b8f48d
+# the differences are AMD cpu detection and the ability to run this script via sudo
 # Usage: runperf ./my-benchmark-binary
 #
 # Script to run a benchmark / performance test in decent conditions. Based on:
@@ -20,7 +20,7 @@
 # Setup
 #
 
-# Detect CPU vendor for appropriate turbo mode handling
+# Detect CPU vendor for appropriate turbo mode handling, default to intel when unable to identify the cpu
 detect_cpu_vendor() {
     if [ -f /proc/cpuinfo ]; then
         local vendor=$(grep -m 1 "vendor_id" /proc/cpuinfo | awk '{print $3}')
@@ -32,11 +32,11 @@ detect_cpu_vendor() {
                 echo "amd"
                 ;;
             *)
-                echo "unknown"
+                echo "intel"
                 ;;
         esac
     else
-        echo "unknown"
+        echo "intel"
     fi
 }
 
@@ -78,36 +78,12 @@ disable_turbo_mode() {
             fi
             ;;
         "amd")
-            # For AMD CPUs, disable boost via cpupower if available
-            if command -v cpupower >/dev/null 2>&1; then
-                sudo cpupower frequency-set --boost-option=disable > /dev/null 2>&1
-                if [ $? -eq 0 ]; then
-                    echo "AMD boost mode disabled via cpupower"
-                else
-                    # Alternative method for AMD: try MSR approach if available
-                    if [ ! -f /sys/devices/system/cpu/cpufreq/boost ] || ! echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost > /dev/null 2>&1; then
-                        echo "Warning: AMD turbo/boost control not available via sysfs"
-                    else
-                        echo "AMD boost disabled via sysfs"
-                    fi
-                fi
-            else
-                echo "Warning: cpupower not available for AMD boost control"
+            if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
+	       echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost > /dev/null 2>&1 
+               echo "AMD boost disabled"
             fi
-
             ;;
         *)
-            echo "Warning: Unknown CPU vendor ($CPU_VENDOR), attempting generic turbo disable"
-            # Try generic approaches
-            if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
-                echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost > /dev/null 2>&1
-                echo "Generic boost disabled via sysfs"
-            elif command -v cpupower >/dev/null 2>&1; then
-                sudo cpupower frequency-set --boost-option=disable > /dev/null 2>&1
-                echo "Generic boost disabled via cpupower"
-            else
-                echo "Warning: No turbo/boost control method available"
-            fi
             ;;
     esac
 }
@@ -133,7 +109,6 @@ echo 0 | sudo tee /sys/devices/system/cpu/cpu5/online > /dev/null
 #
 echo "params full $@"
 ORIGINAL_USER=${SUDO_USER:-$USER}
-#taskset -c 0,1 sudo nice -n -5 runuser -u $USERNAME -- "$1" "${@:2}"
 taskset -c 0,1 sudo nice -n -5 runuser -u $ORIGINAL_USER -- $@
 
 # Monitor cpu-migrations and context-switches. They should both be 0. perf must come before nice to make the benchmark higher priority.
@@ -160,27 +135,12 @@ enable_turbo_mode() {
             ;;
         "amd")
             # Re-enable AMD boost
-            if command -v cpupower >/dev/null 2>&1; then
-                sudo cpupower frequency-set --boost-option=enable > /dev/null 2>&1
-                if [ $? -eq 0 ]; then
-                    echo "AMD boost mode re-enabled via cpupower"
-                else
-                    if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
-                        echo 1 | sudo tee /sys/devices/system/cpu/cpufreq/boost > /dev/null 2>&1
-                        echo "AMD boost re-enabled via sysfs"
-                    fi
-                fi
+            if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
+                echo 1 | sudo tee /sys/devices/system/cpu/cpufreq/boost > /dev/null 2>&1
+                echo "AMD boost re-enabled"
             fi
             ;;
         *)
-            # Generic turbo/boost re-enable
-            if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
-                echo 1 | sudo tee /sys/devices/system/cpu/cpufreq/boost > /dev/null 2>&1
-                echo "Generic boost re-enabled via sysfs"
-            elif command -v cpupower >/dev/null 2>&1; then
-                sudo cpupower frequency-set --boost-option=enable > /dev/null 2>&1
-                echo "Generic boost re-enabled via cpupower"
-            fi
             ;;
     esac
 }

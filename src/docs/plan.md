@@ -19,4 +19,17 @@
 - [x] Write a 8 byte implementation
 - [x] Write an hardware based implementation 
 - [x] Write a 32 byte implementation
-- [ ] Write a 16 byte implementation
+- [x] Write a 16 byte implementation
+
+## WAL Implementation
+- [x] design the wal struct implementation
+- [ ] check if the master dir exists and fails if it doesn't
+- [ ] check if the wal dir exists and create it if it's missing
+- [ ] open operation feature 1 : read the wal dir when no files exist -> it sets the sequence number to 1
+- [ ] fail if the file system does not allow directory creation
+- [ ] add the ability to write an entry -> it returns a sequence number that should be higher than the initial one
+- [ ] add the ability to read entries
+- [ ] verify entry corruption
+- [ ] verify that after an entry is corrupted the next entries cannot be read
+- [ ] performance improvements (to be detailed)
+- [ ] metadata and multiple wal log management
