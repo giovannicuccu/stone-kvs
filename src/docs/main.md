@@ -22,4 +22,9 @@ and you're done.
 - I spent a lot of time trying to understand the CRC32C algorithm and how it works; see some comments in the code
 - I saved the most useful document/explanation I found in `src/docs/crc_v3.txt` downloaded from: https://zlib.net/crc_v3.txt
 - I saved the file because I want to have all the information in a single place
-- The `generate_crc32c_table` function cannot be rewritten in a more idiomatic Rust way because it would lose the `const fn` feature which is mandatory for performance 
+- The `generate_crc32c_table` function cannot be rewritten in a more idiomatic Rust way because it would lose the `const fn` feature which is mandatory for performance
+
+## Error Management
+These are the two referencing for modelling Rust error in this project
+- https://www.shuttle.dev/blog/2022/06/30/error-handling
+- https://sabrinajewson.org/blog/errors

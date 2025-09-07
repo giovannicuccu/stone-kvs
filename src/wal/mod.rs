@@ -1,5 +1,8 @@
 pub mod crc32c;
 
+use std::error::Error;
+use std::fmt;
+use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -19,35 +22,45 @@ pub struct Wal {
 }
 
 impl Wal {
-    pub fn open(config: WalConfig) -> Result<Self, WalError> {
+    pub fn open(config: WalConfig) -> Result<Self, WalOpenError> {
         if !config.path.exists() {
-            return Err(WalError::InvalidConfig(format!(
-                "Directory does not exist: {}, check your configuration/file permissions.",
-                config.path.display()
-            )));
+            return Err({
+                WalOpenError{ path: Box::new(config.path), kind: WalOpenErrorKind::ConfigPathIsNotReadable}});
         }
         
         let wal_dir = config.path.join("wal");
-        std::fs::create_dir_all(&wal_dir).map_err(|e| {
-            WalError::InvalidConfig(format!(
-                "Failed to create WAL directory {}: {}",
-                wal_dir.display(),
-                e
-            ))
-        })?;
-        
-        Ok(Self { config })
+        match  std::fs::create_dir_all(&wal_dir).map_err(|e|
+            WalOpenErrorKind::CannotCreateWalDirectory(e)) {
+            Ok(..) => Ok(Self { config }),
+            Err(kind) =>  Err(WalOpenError { path: Box::new(config.path), kind })
+        }
     }
 }
 
 #[derive(Debug)]
-pub enum WalError {
-    Io(std::io::Error),
-    InvalidConfig(String),
+pub struct WalOpenError {
+    pub path: Box<PathBuf>,
+    pub kind: WalOpenErrorKind,
 }
 
-impl From<std::io::Error> for WalError {
-    fn from(err: std::io::Error) -> Self {
-        WalError::Io(err)
+impl Display for WalOpenError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "error reading `{}`", self.path.display())
     }
+}
+
+impl Error for WalOpenError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.kind {
+            WalOpenErrorKind::CannotCreateWalDirectory(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+
+#[derive(Debug)]
+pub enum WalOpenErrorKind {
+    ConfigPathIsNotReadable,
+    CannotCreateWalDirectory(std::io::Error),
 }
