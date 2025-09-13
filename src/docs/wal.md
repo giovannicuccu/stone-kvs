@@ -164,7 +164,7 @@ After evaluating various WAL implementations (RocksDB, LevelDB, SQLite, PostgreS
 
 ### Record Format
 ```
-[Type(1B) | Sequence(8B) | CRC32C(4B) | Key_Size(4B) | Value_Size(4B) | Key | Value]
+[ CRC32C(4B) | Sequence(8B) | Type(1B) | Key_Size(4B) | Value_Size(4B) | Key | Value]
 ```
 
 ### Design Decisions
@@ -197,4 +197,21 @@ After evaluating various WAL implementations (RocksDB, LevelDB, SQLite, PostgreS
 
 ### Implementation
 The implementation will start simple and will evolve over time. The starting point is a WAL struct
+
+#### Sequence
+The wal holds a sequence number, it's incremented whenever an entry is added. It the wal is created from scratch the sequence number starts from 0.
+The sequence number has type u64.
+
+#### Write operation
+the wal offers `write_entry` method for adding a single entry, the method params are key and value and they are u8 slices.
+the method increments the sequence number encodes the operation with the value defined in this file and serializes the content, 
+following the `Record Format` defined in this file.
+the content must be written in the wal file. the wal file is named 'wal.log' and it resides in the wal dir. 
+If the file does not exists it must be created on wal creation. the file must be initialized with the `File Header` defined in thi document
+The content of the file must be persisted on file system, i.e. if the powers goes down just after the entry is written the entry should be readable from disk.
+the `write_entry` returns the corresponding sequence number
+
+### Read operation
+The read operation is exposed via an iterator. the iterator expose a different wal entry from the write operation since it must expose all the data written. 
+The element returned by the iterator must follow the `Record Format` defined in this document
 

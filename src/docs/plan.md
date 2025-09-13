@@ -24,9 +24,9 @@
 ## WAL Implementation
 - [x] design the wal struct implementation
 - [x] check if the master dir exists and fails if it doesn't
-- [ ] check if the wal dir exists and create it if it's missing
-- [ ] open operation feature 1 : read the wal dir when no files exist -> it sets the sequence number to 1
-- [ ] fail if the file system does not allow directory creation
+- [x] check if the wal dir exists and create it if it's missing
+- [ ] open operation feature 1 : read the wal dir when no files exist -> it sets the sequence number to 0
+- [x] fail if the file system does not allow directory creation
 - [ ] add the ability to write an entry -> it returns a sequence number that should be higher than the initial one
 - [ ] add the ability to read entries
 - [ ] verify entry corruption
