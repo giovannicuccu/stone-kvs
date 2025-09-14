@@ -1,7 +1,7 @@
 **IMPORTANT: At the start of every new session, always read this CLAUDE.md file first to understand project context and instructions.**
 
 Always follow the instructions in plan.md. When I say "go", find the next unmarked test in plan.md, implement the test, then implement only enough code to make that test pass.
-Always save AUTOMATICALLY all the prompts in docs/prompts/prompts.md, do not include the change directory commands.
+Always save AUTOMATICALLY all the prompts in docs/prompts/prompts.md, the prompts **must** be appended to the end of the file, do not include the change directory commands.
 Only update CLAUDE.md files when explicitly requested by the user.
 
 # ROLE AND EXPERTISE

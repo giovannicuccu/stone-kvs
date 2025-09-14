@@ -10,6 +10,36 @@ Id' like to start to implement the wal module but first ? I'd like to evaluate t
 can you save all the prompts I gave in the dir src/docs/prompts?
 ```
 
+## WALEntryIterator Bug Fix
+```
+the method new  of WlaEntryIterator is not correct, it the file does not exists the iterator is empty, if the file does not contain a valid header (you must verify its content) the new method should raise an error
+```
+
+## Iterator Error Handling Architecture Discussion
+```
+when creating a iterator is an idiomatic Rust behaviour to return a Result if the creation cannto be done?
+```
+
+## Iterator Error Separation Request
+```
+The iterator can fail both at creation and at reading the file, so the tow cases must be handled separately. Now we focus on error on iterator creation. the creation fail only if the file exists and its header is not valid. So please go on updating the code following these instruction
+```
+
+## Assertion Message Removal Request
+```
+please remove all the messages from the assertions in tests and in the future do not write assertions with an error message
+```
+
+## WalEntryIterator Refactoring Request
+```
+I'd like to refactor the `new' method of `WalEntryIterator` in @src/wal/mod.rs if the file exists and its content is validated it must create an iterator. if the file does not exists it must return an empty iterator. the iterator properties are a file (type file not an option) and a finished attributes.if the file does not exists the constructor should create a new one using a temporary random name and mark the iterator as finished
+```
+
+## Magic Number Constant Refactoring Request
+```
+in the new method magin number must be refactored as a constant
+```
+
 ```
 No I'd like to have all the prompts (no distinction per module) in a single file called prompts.md
 ```
