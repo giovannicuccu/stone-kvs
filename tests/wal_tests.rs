@@ -115,8 +115,8 @@ fn write_entry_can_be_read_back() {
     assert_eq!(entry.value_size, 10);
 
     // Verify CRC32C checksum using the entry's method
-    use stone_kvs::wal::crc32c::crc32c;
-    let expected_crc = crc32c(&entry.data_for_crc());
+    use stone_kvs::wal::crc32c::crc32c_bit_by_bit;
+    let expected_crc = crc32c_bit_by_bit(&entry.data_for_crc());
     assert_eq!(entry.crc32c, expected_crc);
 
     assert!(iter.next().is_none());
@@ -135,6 +135,33 @@ fn wal_entry_iterator_empty_for_non_existent_file() {
     let entries: Vec<_> = iter.collect();
 
     assert_eq!(entries.len(), 0);
+}
+
+#[test]
+fn wal_entry_iterator_fail_for_non_existent_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path.clone());
+
+    let wal = Wal::open(config).unwrap();
+
+    if let Ok(entries) = fs::read_dir(wal_path) {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if path.is_dir() {
+                    fs::remove_dir_all(&path).unwrap();
+                } else {
+                    fs::remove_file(&path).unwrap();
+                }
+            }
+        }
+    }
+
+    // Get iterator for non-existent file (no entries written yet)
+    let result = wal.entries();
+
+    assert!(result.is_err());
 }
 
 #[test]

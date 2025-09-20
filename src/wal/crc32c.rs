@@ -124,7 +124,7 @@ const CRC32C_TABLES_16: [[u32; 256]; 16] = generate_crc32c_tables_16();
 /// i.e. swap the order of the bits the first one becomes the last and the last one becomes the first and so on
 /// there is no need to add zeros on the left because if you shift the input when you exceed the input length the shifted input
 /// is filled with zeros
-pub fn crc32c(data: &[u8]) -> u32 {
+pub fn crc32c_bit_by_bit(data: &[u8]) -> u32 {
     //right-to-left
     let mut crc = 0xffffffff;
 
@@ -195,78 +195,95 @@ pub fn crc32c_slice8(data: &[u8]) -> u32 {
 
 /// Hardware-accelerated CRC32C implementation using CPU intrinsics
 /// Falls back to table-based implementation if hardware support is not available
-pub fn crc32c_hw(data: &[u8]) -> u32 {
+pub fn crc32c(data: &[u8]) -> u32 {
+    crc32c_incr(0xffffffffu32, data);
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if std::arch::is_x86_feature_detected!("sse4.2") {
-            return crc32c_hw_x86(data);
+            return !crc32c_hw_x86_incr(0xffffffffu32, data);
         }
     }
     
     #[cfg(target_arch = "aarch64")]
     {
         if std::arch::is_aarch64_feature_detected!("crc") {
-            return crc32c_hw_arm(data);
+            return !crc32c_hw_arm(0xffffffffu32, data);
         }
     }
     
     // Fallback to table-based implementation
-    crc32c_table(data)
+    !crc32c_sw_incr(0xffffffffu32, data)
+}
+
+pub fn crc32c_incr(crc: u32, data: &[u8]) -> u32 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if std::arch::is_x86_feature_detected!("sse4.2") {
+            return crc32c_hw_x86_incr(crc, data);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("crc") {
+            return crc32c_hw_arm_incr(crc, data);
+        }
+    }
+
+    // Fallback to table-based implementation
+    crc32c_sw_incr(crc, data)
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn crc32c_hw_x86(data: &[u8]) -> u32 {
+fn crc32c_hw_x86_incr(mut crc: u32, data: &[u8]) -> u32 {
     use std::arch::x86_64::*;
-    
+
     unsafe {
-        let mut crc = 0xffffffffu32;
-        
         let (prefix, u64s, suffix) = data.align_to::<u64>();
-        
+
         // Process unaligned prefix bytes
         for &byte in prefix {
             crc = _mm_crc32_u8(crc, byte);
         }
-        
+
         // Process aligned u64 chunks
         for &value in u64s {
             crc = _mm_crc32_u64(crc as u64, value) as u32;
         }
-        
+
         // Process remaining suffix bytes
         for &byte in suffix {
             crc = _mm_crc32_u8(crc, byte);
         }
-        
-        !crc
+
+        crc
     }
 }
 
 #[cfg(target_arch = "aarch64")]
-fn crc32c_hw_arm(data: &[u8]) -> u32 {
+fn crc32c_hw_arm_incr(mut crc: u32, data: &[u8]) -> u32 {
     use std::arch::aarch64::*;
-    
+
     unsafe {
-        let mut crc = 0xffffffffu32;
-        
+
         let (prefix, u64s, suffix) = data.align_to::<u64>();
-        
+
         // Process unaligned prefix bytes
         for &byte in prefix {
             crc = __crc32cb(crc, byte);
         }
-        
+
         // Process aligned u64 chunks
         for &value in u64s {
             crc = __crc32cd(crc, value);
         }
-        
+
         // Process remaining suffix bytes
         for &byte in suffix {
             crc = __crc32cb(crc, byte);
         }
-        
-        !crc
+
+        crc
     }
 }
 
@@ -364,15 +381,20 @@ pub fn crc32c_slice16_bt(mut buf: &[u8]) -> u32 {
     !crc
 }
 
+
+
+pub fn crc32c_sw(data: &[u8]) -> u32 {
+    !crc32c_incr(0xffffffff, data)
+}
+
 /// CRC32C implementation using slicing-by-16 technique
 /// Processes 16 bytes at a time using 16 lookup tables for high performance
-pub fn crc32c_slice16(data: &[u8]) -> u32 {
-    let mut crc = 0xffffffff;
+pub fn crc32c_sw_incr(mut crc:u32, data: &[u8]) -> u32 {
 
     let (chunks, remainder) = data.as_chunks::<16>();
 
     for &[ b0, b1, b2, b3, b4, b5, b6, b7,
-           b8, b9, b10, b11, b12, b13, b14, b15] in chunks {
+    b8, b9, b10, b11, b12, b13, b14, b15] in chunks {
         crc ^=  u32::from_le_bytes([b0,b1,b2,b3]);
         crc = CRC32C_TABLES_16[0][b15 as usize]
             ^ CRC32C_TABLES_16[1][b14 as usize]
@@ -398,5 +420,51 @@ pub fn crc32c_slice16(data: &[u8]) -> u32 {
         crc = (crc >> 8) ^ CRC32C_TABLE[((crc as u8) ^ byte) as usize];
     }
 
-    !crc
+    crc
+}
+
+/// Incremental CRC32C calculator that allows processing data in multiple chunks
+/// Uses CRC continuation property to chain calculations efficiently
+pub struct IncrementalCrc32c {
+    crc: u32,
+}
+
+impl IncrementalCrc32c {
+    /// Create a new incremental CRC32C calculator
+    pub fn new() -> Self {
+        Self {
+            crc: 0xffffffff,
+        }
+    }
+
+    /// Update the CRC with new data
+    /// This method can be called multiple times with different data chunks
+    pub fn update(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        self.crc = crc32c_sw_incr(self.crc, data);
+    }
+
+    /// Finalize the CRC calculation and return the result
+    /// This consumes the calculator
+    pub fn finalize(self) -> u32 {
+        !self.crc
+    }
+
+    /// Get the current CRC value without consuming the calculator
+    pub fn value(&self) -> u32 {
+        !self.crc
+    }
+
+    /// Reset the calculator to initial state
+    pub fn reset(&mut self) {
+        self.crc = 0xffffffff;
+    }
+}
+
+impl Default for IncrementalCrc32c {
+    fn default() -> Self {
+        Self::new()
+    }
 }

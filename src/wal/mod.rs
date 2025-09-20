@@ -6,6 +6,8 @@ use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use crate::wal::crc32c::{crc32c, IncrementalCrc32c};
+use crate::wal::WalOpenErrorKind::WalFileDoesntExist;
 
 const PUT_OPERATION: u8 = 1;
 const WAL_MAGIC: &[u8; 4] = b"WAL\0";
@@ -139,20 +141,25 @@ impl Wal {
         let key_size = key.len() as u32;
         let value_size = value.len() as u32;
 
+        let mut crc32c = IncrementalCrc32c::new();
+        crc32c.update(&self.sequence.to_le_bytes());
+        crc32c.update(&[PUT_OPERATION]);
+        crc32c.update(&key_size.to_le_bytes());
+        crc32c.update(&value_size.to_le_bytes());
+        crc32c.update(key);
+        crc32c.update(value);
+        let crc32c_value = crc32c.finalize();
         // Build data portion for CRC calculation
-        let mut crc_data = Vec::new();
-        crc_data.extend_from_slice(&self.sequence.to_le_bytes());
-        crc_data.push(PUT_OPERATION);
-        crc_data.extend_from_slice(&key_size.to_le_bytes());
-        crc_data.extend_from_slice(&value_size.to_le_bytes());
-        crc_data.extend_from_slice(key);
-        crc_data.extend_from_slice(value);
 
-        let crc32c_value = crate::wal::crc32c::crc32c(&crc_data);
 
         // Write the record using the pre-opened file handle
         self.file.write_all(&crc32c_value.to_le_bytes())?;
-        self.file.write_all(&crc_data)?;
+        self.file.write_all(&self.sequence.to_le_bytes())?;
+        self.file.write(&[PUT_OPERATION])?;
+        self.file.write_all(&key_size.to_le_bytes())?;
+        self.file.write_all(&value_size.to_le_bytes())?;
+        self.file.write_all(key)?;
+        self.file.write_all(value)?;
         self.file.flush()?;
 
         Ok(self.sequence)
@@ -179,7 +186,10 @@ impl WalEntryIterator {
                 })?;
             Self::create_from_existing_file(file, &wal_log_path)
         } else {
-            Self::create_from_empty_file(&wal_log_path)
+            Err(WalOpenError {
+                path: wal_log_path.clone(),
+                kind: WalFileDoesntExist,
+            })
         }
     }
 
@@ -214,26 +224,6 @@ impl WalEntryIterator {
             return Err(format!("Unsupported WAL version: {}, expected: {}", version, WAL_VERSION));
         }
         Ok(())
-    }
-
-    fn create_from_empty_file(wal_log_path: &PathBuf) -> Result<Self, WalOpenError> {
-        // For non-existent WAL files, use /dev/null or create a minimal temporary file
-        let temp_file = if cfg!(unix) {
-            File::open("/dev/null")
-        } else {
-            let temp_dir = std::env::temp_dir();
-            let temp_path = temp_dir.join(format!("wal_empty_{}.tmp", std::process::id()));
-            File::create(&temp_path)
-                .and_then(|f| { let _ = std::fs::remove_file(&temp_path); Ok(f) })
-        }.map_err(|e| WalOpenError {
-            path: wal_log_path.clone(),
-            kind: WalOpenErrorKind::WalFileError(e),
-        })?;
-
-        Ok(Self {
-            file: temp_file,
-            finished: true,
-        })
     }
 
 }
@@ -311,4 +301,5 @@ pub enum WalOpenErrorKind {
     CannotCreateWalDirectory(io::Error),
     WalFileCorrupted(io::Error),
     WalFileError(io::Error),
+    WalFileDoesntExist,
 }

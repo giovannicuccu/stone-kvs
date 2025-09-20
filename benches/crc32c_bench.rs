@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use stone_kvs::wal::crc32c::{crc32c, crc32c_table, crc32c_slice8, crc32c_hw, crc32c_slice32, crc32c_slice16, crc32c_slice16_bt};
+use stone_kvs::wal::crc32c::{crc32c_bit_by_bit, crc32c_table, crc32c_slice8, crc32c, crc32c_slice32, crc32c_slice16_bt, crc32c_sw};
 
 fn bench_crc32c(c: &mut Criterion) {
     let mut group = c.benchmark_group("crc32c");
@@ -39,7 +39,7 @@ fn bench_crc32c(c: &mut Criterion) {
                 BenchmarkId::new("bit", &bench_name),
                 &data,
                 |b, data| {
-                    b.iter(|| crc32c(data));
+                    b.iter(|| crc32c_bit_by_bit(data));
                 },
             );
             
@@ -66,7 +66,7 @@ fn bench_crc32c(c: &mut Criterion) {
                 BenchmarkId::new("16_bytes", &bench_name),
                 &data,
                 |b, data| {
-                    b.iter(|| crc32c_slice16(data));
+                    b.iter(|| crc32c_sw(data));
                 },
             );
 
@@ -94,7 +94,7 @@ fn bench_crc32c(c: &mut Criterion) {
                 BenchmarkId::new("hardware", &bench_name),
                 &data,
                 |b, data| {
-                    b.iter(|| crc32c_hw(data));
+                    b.iter(|| crc32c(data));
                 },
             );
         });
