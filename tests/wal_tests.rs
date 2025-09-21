@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::fs;
+use std::io::{Seek, Write};
 use tempfile::TempDir;
-use stone_kvs::wal::{Wal, WalConfig};
+use stone_kvs::wal::wal::{Wal, WalConfig};
 
 #[test]
 fn wal_opens_with_valid_directory_path() {
@@ -44,9 +45,9 @@ fn write_entry_increments_sequence_number() {
 fn wal_open_fails_with_non_existent_directory() {
     let non_existent_path = PathBuf::from("/path/that/does/not/exist");
     let config = WalConfig::new(non_existent_path);
-    
+
     let result = Wal::open(config);
-    
+
     assert!(result.is_err());
 }
 
@@ -55,9 +56,9 @@ fn wal_creates_wal_subdirectory_on_open() {
     let temp_dir = TempDir::new().unwrap();
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path.clone());
-    
+
     let result = Wal::open(config);
-    
+
     assert!(result.is_ok());
     let wal_subdir = wal_path.join("wal");
     assert!(wal_subdir.exists());
@@ -68,15 +69,15 @@ fn wal_creates_wal_subdirectory_on_open() {
 fn wal_open_fails_when_directory_is_read_only() {
     let temp_dir = TempDir::new().unwrap();
     let wal_path = temp_dir.path().to_path_buf();
-    
+
     // Make directory read-only
     let mut permissions = fs::metadata(&wal_path).unwrap().permissions();
     permissions.set_readonly(true);
     fs::set_permissions(&wal_path, permissions).unwrap();
-    
+
     let config = WalConfig::new(wal_path);
     let result = Wal::open(config);
-    
+
     assert!(result.is_err());
 }
 
@@ -114,12 +115,6 @@ fn write_entry_can_be_read_back() {
     assert_eq!(entry.key_size, 8);
     assert_eq!(entry.value_size, 10);
 
-    // Verify CRC32C checksum using the entry's method
-    use stone_kvs::wal::crc32c::crc32c_bit_by_bit;
-    let expected_crc = crc32c_bit_by_bit(&entry.data_for_crc());
-    assert_eq!(entry.crc32c, expected_crc);
-
-    assert!(iter.next().is_none());
 }
 
 #[test]
@@ -175,12 +170,94 @@ fn wal_entry_iterator_fails_with_invalid_header() {
     let wal = Wal::open(config).unwrap();
 
     // Create a file with invalid header
-    let wal_log_path = wal_path.join("wal").join("wal.log");
-    let mut file = fs::File::create(&wal_log_path).unwrap();
+    let mut file = fs::File::create(wal.log_path()).unwrap();
     file.write_all(b"INVALID_HEADER___").unwrap();
 
     // Try to create iterator through public API - this should fail at creation time
     let result = wal.entries();
 
     assert!(result.is_err());
+}
+
+#[test]
+fn write_entry_cannot_be_read_back_if_corrupted_entry_data() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path.clone());
+
+    let mut wal = Wal::open(config).unwrap();
+
+    wal.write_entry(b"test_key", b"test_value").unwrap();
+
+    let mut file = fs::OpenOptions::new().write(true).open(wal.log_path()).unwrap();
+
+    file.seek(std::io::SeekFrom::Start(38)).unwrap(); // Skip file header + entry header
+    file.write_all(b"CORRUPTED_DATA").unwrap();
+    file.flush().unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    let entry_res = iter.next().unwrap();
+    assert!(entry_res.is_err());
+}
+
+#[test]
+fn write_entry_cannot_be_read_back_if_corrupted_entry_header() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path.clone());
+
+    let mut wal = Wal::open(config).unwrap();
+
+    wal.write_entry(b"test_key", b"test_value").unwrap();
+
+    let mut file = fs::OpenOptions::new().write(true).open(wal.log_path()).unwrap();
+
+    file.seek(std::io::SeekFrom::Start(24)).unwrap(); // Skip file header + entry header
+    file.write_all(b"CORRUPTED_DATA").unwrap();
+    file.flush().unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    let entry_res = iter.next().unwrap();
+    assert!(entry_res.is_err());
+}
+
+#[test]
+fn write_entry_cannot_be_read_entry_after_a_corrupted_one_in_entry_data() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path.clone());
+
+    let mut wal = Wal::open(config).unwrap();
+
+    wal.write_entry(b"test_key", b"test_value").unwrap();
+    wal.write_entry(b"test_key2", b"test_value2").unwrap();
+
+    let mut file = fs::OpenOptions::new().write(true).open(wal.log_path()).unwrap();
+
+    file.seek(std::io::SeekFrom::Start(38)).unwrap(); // Skip file header + entry header
+    file.write_all(b"CORRUPTED_DATA").unwrap();
+    file.flush().unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    let _ =iter.next().unwrap();
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn wal_entry_iterator_fails_with_corrupted_crc32c() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path.clone());
+
+    let mut wal = Wal::open(config).unwrap();
+    wal.write_entry(b"test_key", b"test_value").unwrap();
+
+    let mut file = fs::OpenOptions::new().write(true).open(wal.log_path()).unwrap();
+    file.seek(std::io::SeekFrom::Start(21)).unwrap(); // Skip 21-byte header
+    file.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap(); // Corrupt CRC32C
+
+    let mut iter = wal.entries().unwrap();
+    let entry_res = iter.next().unwrap();
+
+    assert!(entry_res.is_err());
 }

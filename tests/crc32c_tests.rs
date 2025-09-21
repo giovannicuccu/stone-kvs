@@ -361,7 +361,7 @@ fn incremental_crc32c_mixed_buffer_states() {
     // Add enough to fill and overflow the buffer
     incremental.update(b"rld and more data here");
 
-    let expected = crc32c_sw(b"hello world and more data here");
+    let expected = crc32c(b"hello world and more data here");
     assert_eq!(incremental.finalize(), expected);
 }
 
