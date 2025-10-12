@@ -12,6 +12,14 @@ pub(crate) const WAL_VERSION: u32 = 1;
 pub(crate) const WAL_ENTRY_HEADER_LEN: usize = 21;
 pub(crate) const WAL_FILE_HEADER_LEN: usize = 16;
 
+/// Helper function to convert io::Error to WalError for file operations
+pub(crate) fn map_io_error(path: &PathBuf, e: io::Error) -> WalError {
+    WalError {
+        path: path.clone(),
+        kind: WalErrorKind::WalFileError(e),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WalConfig {
     pub path: PathBuf,

@@ -81,6 +81,10 @@ impl super::Wal for SyncWal {
         let mut status = self.wal_status.write().unwrap();
         status.sequence += 1;
         let sequence_bytes = status.sequence.to_le_bytes();
+
+        // Helper to convert io::Error to WalError
+        let map_err = |e| map_io_error(&self.wal_log_path, e);
+
         // Record Format: [CRC32C(4B) | Sequence(8B) | Type(1B) | Key_Size(4B) | Value_Size(4B) | Key | Value]
         let key_size = key.len() as u32;
         let value_size = value.len() as u32;
@@ -93,38 +97,15 @@ impl super::Wal for SyncWal {
         crc32c.update(key);
         crc32c.update(value);
         let crc32c_value = crc32c.finalize();
-        status.file.write_all(&crc32c_value.to_le_bytes()).map_err(|e| WalError {
-            path: self.wal_log_path.clone(),
-            kind: WalErrorKind::WalFileError(e),
-        })?;
-        status.file.write_all(&sequence_bytes).map_err(|e| WalError {
-            path: self.wal_log_path.clone(),
-            kind: WalErrorKind::WalFileError(e),
-        })?;
-        status.file.write(&[PUT_OPERATION]).map_err(|e| WalError {
-            path: self.wal_log_path.clone(),
-            kind: WalErrorKind::WalFileError(e),
-        })?;
-        status.file.write_all(&key_size.to_le_bytes()).map_err(|e| WalError {
-            path: self.wal_log_path.clone(),
-            kind: WalErrorKind::WalFileError(e),
-        })?;
-        status.file.write_all(&value_size.to_le_bytes()).map_err(|e| WalError {
-            path: self.wal_log_path.clone(),
-            kind: WalErrorKind::WalFileError(e),
-        })?;
-        status.file.write_all(key).map_err(|e| WalError {
-            path: self.wal_log_path.clone(),
-            kind: WalErrorKind::WalFileError(e),
-        })?;
-        status.file.write_all(value).map_err(|e| WalError {
-            path: self.wal_log_path.clone(),
-            kind: WalErrorKind::WalFileError(e),
-        })?;
-        status.file.flush().map_err(|e| WalError {
-            path: self.wal_log_path.clone(),
-            kind: WalErrorKind::WalFileError(e),
-        })?;
+
+        status.file.write_all(&crc32c_value.to_le_bytes()).map_err(map_err)?;
+        status.file.write_all(&sequence_bytes).map_err(map_err)?;
+        status.file.write(&[PUT_OPERATION]).map_err(map_err)?;
+        status.file.write_all(&key_size.to_le_bytes()).map_err(map_err)?;
+        status.file.write_all(&value_size.to_le_bytes()).map_err(map_err)?;
+        status.file.write_all(key).map_err(map_err)?;
+        status.file.write_all(value).map_err(map_err)?;
+        status.file.flush().map_err(map_err)?;
 
         Ok(status.sequence)
     }
