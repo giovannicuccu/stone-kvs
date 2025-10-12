@@ -1,130 +1,34 @@
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::PathBuf;
-use crate::wal::crc32c::{IncrementalCrc32c};
+use crate::wal::crc32c::IncrementalCrc32c;
 
-const PUT_OPERATION: u8 = 1;
-const WAL_MAGIC: &[u8; 4] = b"WAL\0";
-
-const WAL_VERSION: u32 = 1;
-const WAL_ENTRY_HEADER_LEN: usize = 21;
-const WAL_FILE_HEADER_LEN: usize = 16;
+pub(crate) const PUT_OPERATION: u8 = 1;
+pub(crate) const WAL_MAGIC: &[u8; 4] = b"WAL\0";
+pub(crate) const WAL_VERSION: u32 = 1;
+pub(crate) const WAL_ENTRY_HEADER_LEN: usize = 21;
+pub(crate) const WAL_FILE_HEADER_LEN: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct WalConfig {
     pub path: PathBuf,
+    pub buffer_size: usize,
 }
 
 impl WalConfig {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-#[derive(Debug)]
-pub struct Wal {
-    config: WalConfig,
-    sequence: u64,
-    file: File,
-    wal_log_path: PathBuf,
-}
-
-impl Wal {
-    pub fn open(config: WalConfig) -> Result<Self, WalError> {
-        if !config.path.exists() {
-            return Err(WalError {
-                path: config.path.clone(),
-                kind: WalErrorKind::ConfigPathIsNotReadable,
-            });
+        Self {
+            path,
+            buffer_size: 100, // Default buffer size
         }
-
-        let wal_dir = config.path.join("wal");
-        std::fs::create_dir_all(&wal_dir)
-            .map_err(|e| WalError {
-                path: config.path.clone(),
-                kind: WalErrorKind::CannotCreateWalDirectory(e),
-            })?;
-
-        let wal_log_path = wal_dir.join("wal.log");
-
-        // Create or open the WAL file
-        let file = if wal_log_path.exists() {
-            // Open existing file in append mode
-            OpenOptions::new()
-                .append(true)
-                .open(&wal_log_path)
-                .map_err(|e| WalError {
-                    path: config.path.clone(),
-                    kind: WalErrorKind::WalFileError(e),
-                })?
-        } else {
-            // Create new file and write header
-            let mut file = File::create(&wal_log_path)
-                .map_err(|e| WalError {
-                    path: config.path.clone(),
-                    kind: WalErrorKind::WalFileError(e),
-                })?;
-
-            // Write WAL file header: [Magic(4B) | Version(4B) | Reserved(8B)]
-            file.write_all(WAL_MAGIC)
-                .and_then(|_| file.write_all(&WAL_VERSION.to_le_bytes()))
-                .and_then(|_| file.write_all(&[0u8; 8]))
-                .and_then(|_| file.flush())
-                .map_err(|e| WalError {
-                    path: config.path.clone(),
-                    kind: WalErrorKind::WalFileError(e),
-                })?;
-            file
-        };
-
-        Ok(Self { config, sequence: 0, file, wal_log_path })
     }
 
-    pub fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    pub fn log_path(&self) -> &PathBuf {
-        &self.wal_log_path
-    }
-
-    pub fn write_entry(&mut self, key: &[u8], value: &[u8]) -> Result<u64, io::Error> {
-        self.sequence += 1;
-
-        // Record Format: [CRC32C(4B) | Sequence(8B) | Type(1B) | Key_Size(4B) | Value_Size(4B) | Key | Value]
-        let key_size = key.len() as u32;
-        let value_size = value.len() as u32;
-
-        let mut crc32c = IncrementalCrc32c::new();
-        crc32c.update(&self.sequence.to_le_bytes());
-        crc32c.update(&[PUT_OPERATION]);
-        crc32c.update(&key_size.to_le_bytes());
-        crc32c.update(&value_size.to_le_bytes());
-        crc32c.update(key);
-        crc32c.update(value);
-        let crc32c_value = crc32c.finalize();
-        // Build data portion for CRC calculation
-
-
-        // Write the record using the pre-opened file handle
-        self.file.write_all(&crc32c_value.to_le_bytes())?;
-        self.file.write_all(&self.sequence.to_le_bytes())?;
-        self.file.write(&[PUT_OPERATION])?;
-        self.file.write_all(&key_size.to_le_bytes())?;
-        self.file.write_all(&value_size.to_le_bytes())?;
-        self.file.write_all(key)?;
-        self.file.write_all(value)?;
-        self.file.flush()?;
-
-        Ok(self.sequence)
-    }
-
-    pub fn entries(&self) -> Result<WalEntryIterator, WalError> {
-        let wal_log_path = self.config.path.join("wal").join("wal.log");
-        WalEntryIterator::new(wal_log_path)
+    pub fn with_buffer_size(mut self, buffer_size: usize) -> Self {
+        self.buffer_size = buffer_size;
+        self
     }
 }
 
@@ -140,7 +44,7 @@ pub struct WalEntry {
 }
 
 impl WalEntry {
-    fn new(crc32c: u32, sequence: u64, entry_type: u8, key_size: u32, value_size: u32, key: Vec<u8>, value: Vec<u8>) -> Self {
+    pub(crate) fn new(crc32c: u32, sequence: u64, entry_type: u8, key_size: u32, value_size: u32, key: Vec<u8>, value: Vec<u8>) -> Self {
         Self {
             crc32c,
             sequence,
@@ -153,8 +57,6 @@ impl WalEntry {
     }
 }
 
-
-
 pub struct WalEntryIterator {
     file: File,
     wal_log_path: PathBuf,
@@ -162,7 +64,7 @@ pub struct WalEntryIterator {
 }
 
 impl WalEntryIterator {
-    fn new(wal_log_path: PathBuf) -> Result<Self, WalError> {
+    pub(crate) fn new(wal_log_path: PathBuf) -> Result<Self, WalError> {
         if wal_log_path.exists() {
             let file = File::open(&wal_log_path)
                 .map_err(|e| WalError {
@@ -211,7 +113,6 @@ impl WalEntryIterator {
         }
         Ok(())
     }
-
 }
 
 impl Iterator for WalEntryIterator {
@@ -295,7 +196,6 @@ impl Error for WalError {
     }
 }
 
-
 #[derive(Debug)]
 pub enum WalErrorKind {
     ConfigPathIsNotReadable,
@@ -303,4 +203,5 @@ pub enum WalErrorKind {
     WalFileCorrupted(io::Error),
     WalFileError(io::Error),
     WalFileDoesntExist,
+    WriterThreadDisconnected,
 }

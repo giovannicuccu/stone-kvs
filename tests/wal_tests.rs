@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::fs;
 use std::io::{Seek, Write};
 use tempfile::TempDir;
-use stone_kvs::wal::wal::{Wal, WalConfig};
+use stone_kvs::wal::{SyncWal, WalConfig, Wal};
 
 #[test]
 fn wal_opens_with_valid_directory_path() {
@@ -10,7 +10,7 @@ fn wal_opens_with_valid_directory_path() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path);
 
-    let result = Wal::open(config);
+    let result = SyncWal::open(config);
 
     assert!(result.is_ok());
 }
@@ -21,7 +21,7 @@ fn wal_initializes_sequence_number_to_zero() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path);
 
-    let wal = Wal::open(config).unwrap();
+    let wal = SyncWal::open(config).unwrap();
 
     assert_eq!(wal.sequence(), 0);
 }
@@ -32,7 +32,7 @@ fn write_entry_increments_sequence_number() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path);
 
-    let mut wal = Wal::open(config).unwrap();
+    let mut wal = SyncWal::open(config).unwrap();
     let initial_sequence = wal.sequence();
 
     let returned_sequence = wal.write_entry(b"key1", b"value1").unwrap();
@@ -46,7 +46,7 @@ fn wal_open_fails_with_non_existent_directory() {
     let non_existent_path = PathBuf::from("/path/that/does/not/exist");
     let config = WalConfig::new(non_existent_path);
 
-    let result = Wal::open(config);
+    let result = SyncWal::open(config);
 
     assert!(result.is_err());
 }
@@ -57,7 +57,7 @@ fn wal_creates_wal_subdirectory_on_open() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path.clone());
 
-    let result = Wal::open(config);
+    let result = SyncWal::open(config);
 
     assert!(result.is_ok());
     let wal_subdir = wal_path.join("wal");
@@ -76,7 +76,7 @@ fn wal_open_fails_when_directory_is_read_only() {
     fs::set_permissions(&wal_path, permissions).unwrap();
 
     let config = WalConfig::new(wal_path);
-    let result = Wal::open(config);
+    let result = SyncWal::open(config);
 
     assert!(result.is_err());
 }
@@ -87,7 +87,7 @@ fn entries_iterator_returns_empty_for_new_wal() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path);
 
-    let wal = Wal::open(config).unwrap();
+    let wal = SyncWal::open(config).unwrap();
     let iter = wal.entries().unwrap();
     let entries: Result<Vec<_>, _> = iter.collect();
 
@@ -101,7 +101,7 @@ fn write_entry_can_be_read_back() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path);
 
-    let mut wal = Wal::open(config).unwrap();
+    let mut wal = SyncWal::open(config).unwrap();
 
     let returned_sequence = wal.write_entry(b"test_key", b"test_value").unwrap();
 
@@ -123,7 +123,7 @@ fn wal_entry_iterator_empty_for_non_existent_file() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path);
 
-    let wal = Wal::open(config).unwrap();
+    let wal = SyncWal::open(config).unwrap();
 
     // Get iterator for non-existent file (no entries written yet)
     let iter = wal.entries().unwrap();
@@ -138,7 +138,7 @@ fn wal_entry_iterator_fail_for_non_existent_file() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path.clone());
 
-    let wal = Wal::open(config).unwrap();
+    let wal = SyncWal::open(config).unwrap();
 
     if let Ok(entries) = fs::read_dir(wal_path) {
         for entry in entries {
@@ -167,7 +167,7 @@ fn wal_entry_iterator_fails_with_invalid_header() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path.clone());
 
-    let wal = Wal::open(config).unwrap();
+    let wal = SyncWal::open(config).unwrap();
 
     // Create a file with invalid header
     let mut file = fs::File::create(wal.log_path()).unwrap();
@@ -185,7 +185,7 @@ fn write_entry_cannot_be_read_back_if_corrupted_entry_data() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path.clone());
 
-    let mut wal = Wal::open(config).unwrap();
+    let mut wal = SyncWal::open(config).unwrap();
 
     wal.write_entry(b"test_key", b"test_value").unwrap();
 
@@ -206,7 +206,7 @@ fn write_entry_cannot_be_read_back_if_corrupted_entry_header() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path.clone());
 
-    let mut wal = Wal::open(config).unwrap();
+    let mut wal = SyncWal::open(config).unwrap();
 
     wal.write_entry(b"test_key", b"test_value").unwrap();
 
@@ -227,7 +227,7 @@ fn write_entry_cannot_be_read_entry_after_a_corrupted_one_in_entry_data() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path.clone());
 
-    let mut wal = Wal::open(config).unwrap();
+    let mut wal = SyncWal::open(config).unwrap();
 
     wal.write_entry(b"test_key", b"test_value").unwrap();
     wal.write_entry(b"test_key2", b"test_value2").unwrap();
@@ -249,7 +249,7 @@ fn wal_entry_iterator_fails_with_corrupted_crc32c() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path.clone());
 
-    let mut wal = Wal::open(config).unwrap();
+    let mut wal = SyncWal::open(config).unwrap();
     wal.write_entry(b"test_key", b"test_value").unwrap();
 
     let mut file = fs::OpenOptions::new().write(true).open(wal.log_path()).unwrap();
