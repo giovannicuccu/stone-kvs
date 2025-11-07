@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::fs;
 use std::io::{Seek, Write};
 use tempfile::TempDir;
-use stone_kvs::wal::{SyncWal, WalConfig, Wal};
+use stone_kvs::wal::{SyncWal, WalConfig, Wal, ChannelWal};
 
 #[test]
 fn wal_opens_with_valid_directory_path() {
@@ -260,4 +260,19 @@ fn wal_entry_iterator_fails_with_corrupted_crc32c() {
     let entry_res = iter.next().unwrap();
 
     assert!(entry_res.is_err());
+}
+
+#[test]
+fn channel_write_entry_increments_sequence_number() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path);
+
+    let wal = ChannelWal::new(config).unwrap();
+    let initial_sequence = wal.sequence();
+
+    let returned_sequence = wal.write_entry(b"key1", b"value1").unwrap();
+
+    assert_eq!(returned_sequence, initial_sequence + 1);
+    assert_eq!(wal.sequence(), initial_sequence + 1);
 }

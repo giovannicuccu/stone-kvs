@@ -1,8 +1,11 @@
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
+use std::sync::mpsc::Receiver;
 use std::thread;
+use std::time::Duration;
 use crate::wal::crc32c::IncrementalCrc32c;
 use crate::wal::wal_commons::*;
 
@@ -16,6 +19,7 @@ struct WriteRequest {
 pub struct ChannelWal {
     sender: mpsc::SyncSender<WriteRequest>,
     _writer_handle: thread::JoinHandle<()>,
+    sequence:Arc<AtomicU64>,
     config: WalConfig,
 }
 
@@ -23,25 +27,44 @@ impl ChannelWal {
     pub fn new(config: WalConfig) -> Result<Self, WalError> {
         let inner_config = config.clone();
         let (sender, receiver) = mpsc::sync_channel(config.buffer_size);
-
+        let sequence = Arc::new(AtomicU64::new(0));
+        let sequence_clone = sequence.clone();
         let writer_handle = thread::spawn(move || {
-            let mut wal = match InnerWal::open(config.clone()) {
+            let wal = match InnerWal::open(config.clone(),sequence_clone) {
                 Ok(wal) => wal,
                 Err(_) => return,
             };
-
-            while let Ok(WriteRequest { key, value, response_tx }) = receiver.recv() {
-                let result = wal.write_entry(&key, &value);
-                let _ = response_tx.send(result); // Ignore if receiver dropped
-            }
+            write_entries(receiver, wal);
         });
 
         Ok(Self {
             sender,
             _writer_handle: writer_handle,
+            sequence,
             config: inner_config,
         })
     }
+}
+
+fn write_entries(receiver: Receiver<WriteRequest>, mut wal: InnerWal) {
+    let timeout_millis = Duration::from_millis(2);
+    let mut counter=0;
+
+    loop {
+        let mut response_holder=vec![];
+        while counter < 10 && let Ok(WriteRequest { key, value, response_tx }) = receiver.recv_timeout(timeout_millis) {
+            let result = wal.write_entry(&key, &value);
+            counter = counter + 1;
+            response_holder.push((response_tx, result));
+            //let _ = response_tx.send(result); // Ignore if receiver dropped
+        }
+        for (response_tx, result) in response_holder {
+            let _ = response_tx.send(result);
+        }
+        let _ = wal.commit();
+        counter=0;
+    }
+
 }
 
 impl super::Wal for ChannelWal {
@@ -70,17 +93,21 @@ impl super::Wal for ChannelWal {
         let wal_log_path = self.config.path.join("wal").join("wal.log");
         WalEntryIterator::new(wal_log_path)
     }
+
+    fn sequence(&self) -> u64 {
+        self.sequence.load(Ordering::SeqCst)
+    }
 }
 
 pub struct InnerWal {
     config: WalConfig,
-    sequence: u64,
-    file: File,
+    sequence:Arc<AtomicU64>,
+    file: BufWriter<File>,
     wal_log_path: PathBuf,
 }
 
 impl InnerWal {
-    pub fn open(config: WalConfig) -> Result<Self, WalError> {
+    pub fn open(config: WalConfig, sequence: Arc<AtomicU64>) -> Result<Self, WalError> {
         if !config.path.exists() {
             return Err(WalError {
                 path: config.path.clone(),
@@ -127,11 +154,11 @@ impl InnerWal {
             file
         };
 
-        Ok(Self { config,  sequence: 0, file , wal_log_path })
+        Ok(Self { config,  sequence, file: BufWriter::with_capacity(4096,file) , wal_log_path })
     }
 
     pub fn sequence(&self) -> u64 {
-        self.sequence
+        self.sequence.load(Ordering::SeqCst)
     }
 
     pub fn log_path(&self) -> &PathBuf {
@@ -139,8 +166,8 @@ impl InnerWal {
     }
 
     fn write_entry(&mut self, key: &[u8], value: &[u8]) -> Result<u64, WalError> {
-        self.sequence += 1;
-        let sequence_bytes = self.sequence.to_le_bytes();
+        let sequence=self.sequence.fetch_add(1, Ordering::SeqCst)+1;
+        let sequence_bytes = sequence.to_le_bytes();
 
         // Helper to convert io::Error to WalError
         let map_err = |e| map_io_error(&self.wal_log_path, e);
@@ -165,8 +192,18 @@ impl InnerWal {
         self.file.write_all(&value_size.to_le_bytes()).map_err(map_err)?;
         self.file.write_all(key).map_err(map_err)?;
         self.file.write_all(value).map_err(map_err)?;
-        self.file.flush().map_err(map_err)?;
+        //self.file.flush().map_err(map_err)?;
+        //self.file.sync_all().map_err(map_err)?;
 
-        Ok(self.sequence)
+        Ok(sequence)
+    }
+
+    fn commit(&mut self) -> Result<(), WalError> {
+        let map_err = |e| map_io_error(&self.wal_log_path, e);
+        self.file.flush().map_err(map_err)?;
+        //self.file.get_mut().sync_all().map_err(map_err)?;
+        //self.file.sync_all().map_err(map_err)?;
+
+        Ok(())
     }
 }

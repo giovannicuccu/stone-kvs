@@ -67,9 +67,7 @@ impl SyncWal {
         Ok(Self { config, wal_status: RwLock::new(WalStatus { sequence: 0, file }), wal_log_path })
     }
 
-    pub fn sequence(&self) -> u64 {
-        self.wal_status.read().unwrap().sequence
-    }
+
 
     pub fn log_path(&self) -> &PathBuf {
         &self.wal_log_path
@@ -113,5 +111,9 @@ impl super::Wal for SyncWal {
     fn entries(&self) -> Result<WalEntryIterator, WalError> {
         let wal_log_path = self.config.path.join("wal").join("wal.log");
         WalEntryIterator::new(wal_log_path)
+    }
+
+    fn sequence(&self) -> u64 {
+        self.wal_status.read().unwrap().sequence
     }
 }

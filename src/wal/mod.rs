@@ -12,4 +12,5 @@ pub use channel_wal::ChannelWal;
 pub trait Wal {
     fn write_entry(&self, key: &[u8], value: &[u8]) -> Result<u64, WalError>;
     fn entries(&self) -> Result<WalEntryIterator, WalError>;
+    fn sequence(&self) -> u64;
 }
