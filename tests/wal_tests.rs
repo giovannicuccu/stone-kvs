@@ -1,9 +1,11 @@
-use std::path::PathBuf;
 use std::fs;
 use std::io::{Seek, Write};
+use std::path::PathBuf;
+use stone_kvs::wal::{ChannelWal, SyncWal, Wal, WalConfig, WalEntry};
 use tempfile::TempDir;
-use stone_kvs::wal::{SyncWal, WalConfig, Wal, ChannelWal};
 
+const PUT_OPERATION: u8 = 1;
+const BLOCK_SIZE: usize = 1024 * 32;
 #[test]
 fn wal_opens_with_valid_directory_path() {
     let temp_dir = TempDir::new().unwrap();
@@ -114,7 +116,6 @@ fn write_entry_can_be_read_back() {
     assert_eq!(entry.value, b"test_value");
     assert_eq!(entry.key_size, 8);
     assert_eq!(entry.value_size, 10);
-
 }
 
 #[test]
@@ -189,7 +190,10 @@ fn write_entry_cannot_be_read_back_if_corrupted_entry_data() {
 
     wal.write_entry(b"test_key", b"test_value").unwrap();
 
-    let mut file = fs::OpenOptions::new().write(true).open(wal.log_path()).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(wal.log_path())
+        .unwrap();
 
     file.seek(std::io::SeekFrom::Start(38)).unwrap(); // Skip file header + entry header
     file.write_all(b"CORRUPTED_DATA").unwrap();
@@ -210,7 +214,10 @@ fn write_entry_cannot_be_read_back_if_corrupted_entry_header() {
 
     wal.write_entry(b"test_key", b"test_value").unwrap();
 
-    let mut file = fs::OpenOptions::new().write(true).open(wal.log_path()).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(wal.log_path())
+        .unwrap();
 
     file.seek(std::io::SeekFrom::Start(24)).unwrap(); // Skip file header + entry header
     file.write_all(b"CORRUPTED_DATA").unwrap();
@@ -232,14 +239,17 @@ fn write_entry_cannot_be_read_entry_after_a_corrupted_one_in_entry_data() {
     wal.write_entry(b"test_key", b"test_value").unwrap();
     wal.write_entry(b"test_key2", b"test_value2").unwrap();
 
-    let mut file = fs::OpenOptions::new().write(true).open(wal.log_path()).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(wal.log_path())
+        .unwrap();
 
     file.seek(std::io::SeekFrom::Start(38)).unwrap(); // Skip file header + entry header
     file.write_all(b"CORRUPTED_DATA").unwrap();
     file.flush().unwrap();
 
     let mut iter = wal.entries().unwrap();
-    let _ =iter.next().unwrap();
+    let _ = iter.next().unwrap();
     assert!(iter.next().is_none());
 }
 
@@ -252,7 +262,10 @@ fn wal_entry_iterator_fails_with_corrupted_crc32c() {
     let mut wal = SyncWal::open(config).unwrap();
     wal.write_entry(b"test_key", b"test_value").unwrap();
 
-    let mut file = fs::OpenOptions::new().write(true).open(wal.log_path()).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(wal.log_path())
+        .unwrap();
     file.seek(std::io::SeekFrom::Start(21)).unwrap(); // Skip 21-byte header
     file.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap(); // Corrupt CRC32C
 
@@ -268,11 +281,111 @@ fn channel_write_entry_increments_sequence_number() {
     let wal_path = temp_dir.path().to_path_buf();
     let config = WalConfig::new(wal_path);
 
-    let wal = ChannelWal::new(config).unwrap();
+    let wal = ChannelWal::open(config).unwrap();
     let initial_sequence = wal.sequence();
 
-    let returned_sequence = wal.write_entry(b"key1", b"value1").unwrap();
+    let (entry_sequence, key, value) = wal
+        .write_entry(b"key1".to_vec(), b"value1".to_vec())
+        .unwrap();
 
-    assert_eq!(returned_sequence, initial_sequence + 1);
+    assert_eq!(entry_sequence, initial_sequence + 1);
     assert_eq!(wal.sequence(), initial_sequence + 1);
+}
+
+#[test]
+fn channel_write_entry_can_be_read_back() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path);
+
+    let wal = ChannelWal::open(config).unwrap();
+
+    let key = b"test_key";
+    let value = b"test_value";
+    let (entry_sequence, _, _) = wal.write_entry(key.to_vec(), value.to_vec()).unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    let entry = iter.next().unwrap().unwrap();
+
+    assert_entry_matches(entry, entry_sequence, key, value);
+}
+
+#[test]
+fn channel_write_entry_only_one_can_be_read_back() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path);
+
+    let wal = ChannelWal::open(config).unwrap();
+
+    let key = b"test_key";
+    let value = b"test_value";
+    let (entry_sequence, _, _) = wal.write_entry(key.to_vec(), value.to_vec()).unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    let _ = iter.next().unwrap().unwrap();
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn channel_empty_no_one_can_be_read_back() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path);
+
+    let mut wal = ChannelWal::open(config).unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn channel_write_two_entries_can_be_read_back() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path);
+
+    let wal = ChannelWal::open(config).unwrap();
+
+    let key = b"test_key";
+    let value = b"test_value";
+    let (_, _, _) = wal.write_entry(key.to_vec(), value.to_vec()).unwrap();
+
+    let key = b"test_key2";
+    let value = b"test_value2";
+    let (entry_sequence, _, _) = wal.write_entry(key.to_vec(), value.to_vec()).unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    let _ = iter.next().unwrap().unwrap();
+    let entry = iter.next().unwrap().unwrap();
+
+    assert_entry_matches(entry, entry_sequence, key, value);
+}
+
+#[test]
+fn channel_write_one_entry_two_chunks() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path);
+
+    let wal = ChannelWal::open(config).unwrap();
+
+    let key = b"test_key";
+    let value = vec![1 as u8; BLOCK_SIZE + 100];
+
+    let (entry_sequence, _, value) = wal.write_entry(key.to_vec(), value).unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    let entry = iter.next().unwrap().unwrap();
+
+    assert_entry_matches(entry, entry_sequence, key, &value);
+}
+
+fn assert_entry_matches(entry: WalEntry, entry_sequence: u64, key: &[u8], value: &[u8]) {
+    assert_eq!(entry.sequence, entry_sequence);
+    assert_eq!(entry.entry_type, PUT_OPERATION);
+    assert_eq!(entry.key, key);
+    assert_eq!(entry.value, value);
+    assert_eq!(entry.key_size, key.len() as u32);
+    assert_eq!(entry.value_size, value.len() as u32);
 }

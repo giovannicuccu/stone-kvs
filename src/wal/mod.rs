@@ -1,12 +1,12 @@
-pub mod crc32c;
-mod wal_commons;
-mod sync_wal;
 mod channel_wal;
+pub mod crc32c;
+mod sync_wal;
+mod wal_commons;
 
 // Re-export common types
-pub use wal_commons::{WalConfig, WalEntry, WalEntryIterator, WalError, WalErrorKind};
-pub use sync_wal::SyncWal;
 pub use channel_wal::ChannelWal;
+pub use sync_wal::SyncWal;
+pub use wal_commons::{WalConfig, WalEntry, WalEntryIterator, WalError, WalErrorKind};
 
 // The Wal trait
 pub trait Wal {

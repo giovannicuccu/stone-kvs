@@ -234,7 +234,7 @@ fn stonekvs_multithreaded_benchmark() {
 
     let config = WalConfig::new(PathBuf::from(wal_path.clone()));
 
-    let wal = Arc::new(ChannelWal::new(config).unwrap());
+    let wal = Arc::new(ChannelWal::open(config).unwrap());
 
     let num_threads = 10;
     let total_writes = Arc::new(AtomicU64::new(0));
@@ -409,13 +409,13 @@ fn stonekvs_multithreaded_benchmark() {
                     let data = vec![((counter % 256)+1024) as u8; size];
                     let key = format!("{}:{}", topic, counter);
 
-                    match db_clone.write_entry(key.as_bytes(), data.as_slice()) {
-                        Ok(_) => {
+                    match db_clone.write_entry(key.as_bytes().to_vec(), data) {
+                        Ok((_,_,dataout)) => {
                             local_writes += 1;
-                            local_write_bytes += data.len() as u64;
+                            local_write_bytes += dataout.len() as u64;
                             total_writes_clone.fetch_add(1, Ordering::Relaxed);
                             total_write_bytes_clone
-                                .fetch_add(data.len() as u64, Ordering::Relaxed);
+                                .fetch_add(dataout.len() as u64, Ordering::Relaxed);
                         }
                         Err(err) => {
                             eprintln!(
