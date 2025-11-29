@@ -15,7 +15,7 @@ pub const BLOCK_SIZE: usize = 1024 * 32;
 const WAL_HEADER_RECORD_SIZE: usize = 7;
 const WAL_RECORD_HEADER_RECORD_SIZE: usize = 17;
 
-struct WriteRequest {
+pub struct WriteRequest {
     key: Vec<u8>,
     value: Vec<u8>,
     response_tx: mpsc::SyncSender<Result<(u64, Vec<u8>, Vec<u8>), WalError>>,
@@ -63,9 +63,9 @@ impl ChannelWal {
                 value,
                 response_tx,
             })
-            .map_err(|_| WalError {
+            .map_err(|err| WalError {
                 path: PathBuf::new(),
-                kind: WalErrorKind::WriterThreadDisconnected,
+                kind: WalErrorKind::ChannelDisconnected(err),
             })?;
 
         // Wait for response
@@ -185,7 +185,6 @@ impl InnerWal {
         value: Vec<u8>,
     ) -> Result<(u64, Vec<u8>, Vec<u8>), WalError> {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-        let sequence_bytes = sequence.to_le_bytes();
 
         // Helper to convert io::Error to WalError
         let map_err = |e| map_io_error(&self.wal_log_path, e);
@@ -199,7 +198,7 @@ impl InnerWal {
 
         let mut bytes_to_write = header_data.len() + key.len() + value.len();
 
-        let block_type: u8 = if bytes_to_write >= (BLOCK_SIZE - WAL_HEADER_RECORD_SIZE) {
+        let block_type: u8 = if bytes_to_write >= (BLOCK_SIZE - self.block_offset) {
             2
         } else {
             1
@@ -235,7 +234,7 @@ impl InnerWal {
         self.block_buffer[self.block_offset + 4..self.block_offset + 6]
             .copy_from_slice(&(record_len as u16).to_le_bytes());
         self.block_buffer[self.block_offset + 6] = block_type;
-        self.block_offset += 7;
+        self.block_offset += WAL_HEADER_RECORD_SIZE;
     }
     fn write_data(
         &mut self,
@@ -418,7 +417,7 @@ fn read_chunk_header(
             chunk_type,
             chunk_offset: 0,
         },
-        block_offset + 7,
+        block_offset + WAL_HEADER_RECORD_SIZE,
     )
 }
 

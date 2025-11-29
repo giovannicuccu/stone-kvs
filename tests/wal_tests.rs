@@ -1,6 +1,10 @@
-use std::fs;
+use rand::Rng;
 use std::io::{Seek, Write};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
+use std::{fs, thread};
 use stone_kvs::wal::{ChannelWal, SyncWal, Wal, WalConfig, WalEntry};
 use tempfile::TempDir;
 
@@ -379,6 +383,98 @@ fn channel_write_one_entry_two_chunks() {
     let entry = iter.next().unwrap().unwrap();
 
     assert_entry_matches(entry, entry_sequence, key, &value);
+}
+
+#[test]
+fn channel_write_one_entry_in_first_chunk_and_one_across_two_chunks() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path);
+
+    let wal = ChannelWal::open(config).unwrap();
+
+    let key = b"test_key";
+    let value = vec![1u8; BLOCK_SIZE / 2];
+
+    let (_, _, _) = wal.write_entry(key.to_vec(), value).unwrap();
+
+    let key = b"test_key_2";
+    let value = vec![1u8; (BLOCK_SIZE / 2) + 200];
+
+    let (entry_sequence, _, value) = wal.write_entry(key.to_vec(), value).unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    let _ = iter.next().unwrap().unwrap();
+    let entry = iter.next().unwrap().unwrap();
+
+    assert_entry_matches(entry, entry_sequence, key, &value);
+}
+
+#[test]
+fn channel_write_two_entry_in_first_chunk_and_one_across_two_chunks() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path);
+
+    let wal = ChannelWal::open(config).unwrap();
+
+    let key = b"test_key";
+    let value = vec![1u8; BLOCK_SIZE / 4];
+
+    let (_, _, _) = wal.write_entry(key.to_vec(), value).unwrap();
+
+    let key = b"test_key_2";
+    let value = vec![2u8; BLOCK_SIZE / 4];
+
+    let (_, _, _) = wal.write_entry(key.to_vec(), value).unwrap();
+
+    let key = b"test_key_3";
+    let value = vec![1u8; (BLOCK_SIZE / 2) + 200];
+
+    let (entry_sequence, _, value) = wal.write_entry(key.to_vec(), value).unwrap();
+
+    let mut iter = wal.entries().unwrap();
+    let _ = iter.next().unwrap().unwrap();
+    let _ = iter.next().unwrap().unwrap();
+    let entry = iter.next().unwrap().unwrap();
+
+    assert_entry_matches(entry, entry_sequence, key, &value);
+}
+
+#[test]
+fn channel_write_from_two_threads() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_path = temp_dir.path().to_path_buf();
+    let config = WalConfig::new(wal_path);
+
+    let wal = Arc::new(ChannelWal::open(config).unwrap());
+
+    let num_threads = 2;
+    let mut handles = Vec::new();
+    let start_barrier = Arc::new(Barrier::new(num_threads + 1));
+    for thread_id in 0..num_threads {
+        let db_clone = Arc::clone(&wal);
+        let start_barrier_clone = Arc::clone(&start_barrier);
+        let handle = thread::spawn(move || {
+            start_barrier_clone.wait();
+            let mut rng = rand::thread_rng();
+            let size = rng.gen_range(500..=1024);
+            let data = vec![2 as u8; size];
+            let key = format!("{}", thread_id);
+
+            match db_clone.write_entry(key.as_bytes().to_vec(), data) {
+                Ok((entry_sequence, _, value)) => {
+                    let mut iter = db_clone.entries().unwrap();
+                    let entry = iter.next().unwrap().unwrap();
+                    assert_entry_matches(entry, entry_sequence, key.as_bytes(), &value);
+                }
+                Err(err) => {
+                    eprintln!("Thread {} put error: {}", thread_id, err);
+                }
+            }
+        });
+        handles.push(handle);
+    }
 }
 
 fn assert_entry_matches(entry: WalEntry, entry_sequence: u64, key: &[u8], value: &[u8]) {

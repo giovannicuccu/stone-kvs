@@ -1,10 +1,12 @@
+use crate::wal::channel_wal::WriteRequest;
+use crate::wal::crc32c::IncrementalCrc32c;
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
-use crate::wal::crc32c::IncrementalCrc32c;
+use std::sync::mpsc::SendError;
 
 pub(crate) const PUT_OPERATION: u8 = 1;
 pub(crate) const WAL_MAGIC: &[u8; 4] = b"WAL\0";
@@ -52,7 +54,15 @@ pub struct WalEntry {
 }
 
 impl WalEntry {
-    pub(crate) fn new(crc32c: u32, sequence: u64, entry_type: u8, key_size: u32, value_size: u32, key: Vec<u8>, value: Vec<u8>) -> Self {
+    pub(crate) fn new(
+        crc32c: u32,
+        sequence: u64,
+        entry_type: u8,
+        key_size: u32,
+        value_size: u32,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Self {
         Self {
             crc32c,
             sequence,
@@ -74,11 +84,10 @@ pub struct WalEntryIterator {
 impl WalEntryIterator {
     pub(crate) fn new(wal_log_path: PathBuf) -> Result<Self, WalError> {
         if wal_log_path.exists() {
-            let file = File::open(&wal_log_path)
-                .map_err(|e| WalError {
-                    path: wal_log_path.clone(),
-                    kind: WalErrorKind::WalFileError(e),
-                })?;
+            let file = File::open(&wal_log_path).map_err(|e| WalError {
+                path: wal_log_path.clone(),
+                kind: WalErrorKind::WalFileError(e),
+            })?;
             Self::create_from_existing_file(file, &wal_log_path)
         } else {
             Err(WalError {
@@ -90,17 +99,18 @@ impl WalEntryIterator {
 
     fn create_from_existing_file(mut file: File, wal_log_path: &PathBuf) -> Result<Self, WalError> {
         let mut header = [0u8; WAL_FILE_HEADER_LEN];
-        file.read_exact(&mut header)
-            .map_err(|e| WalError {
-                path: wal_log_path.clone(),
-                kind: WalErrorKind::WalFileCorrupted(io::Error::new(io::ErrorKind::InvalidData, format!("Cannot read WAL header: {}", e))),
-            })?;
+        file.read_exact(&mut header).map_err(|e| WalError {
+            path: wal_log_path.clone(),
+            kind: WalErrorKind::WalFileCorrupted(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Cannot read WAL header: {}", e),
+            )),
+        })?;
 
-        Self::validate_header_file(&header)
-            .map_err(|msg| WalError {
-                path: wal_log_path.clone(),
-                kind: WalErrorKind::WalFileCorrupted(io::Error::new(io::ErrorKind::InvalidData, msg)),
-            })?;
+        Self::validate_header_file(&header).map_err(|msg| WalError {
+            path: wal_log_path.clone(),
+            kind: WalErrorKind::WalFileCorrupted(io::Error::new(io::ErrorKind::InvalidData, msg)),
+        })?;
 
         Ok(Self {
             file,
@@ -117,7 +127,10 @@ impl WalEntryIterator {
 
         let version = u32::from_le_bytes(rest[0..4].try_into().unwrap());
         if version != WAL_VERSION {
-            return Err(format!("Unsupported WAL version: {}, expected: {}", version, WAL_VERSION));
+            return Err(format!(
+                "Unsupported WAL version: {}, expected: {}",
+                version, WAL_VERSION
+            ));
         }
         Ok(())
     }
@@ -140,7 +153,10 @@ impl Iterator for WalEntryIterator {
 
         // Decode header fields using array slicing
         let crc32c = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-        let sequence = u64::from_le_bytes([header[4], header[5], header[6], header[7], header[8], header[9], header[10], header[11]]);
+        let sequence = u64::from_le_bytes([
+            header[4], header[5], header[6], header[7], header[8], header[9], header[10],
+            header[11],
+        ]);
         let entry_type = header[12];
         let key_size = u32::from_le_bytes([header[13], header[14], header[15], header[16]]);
         let value_size = u32::from_le_bytes([header[17], header[18], header[19], header[20]]);
@@ -152,19 +168,25 @@ impl Iterator for WalEntryIterator {
             self.finished = true;
             return Some(Err(WalError {
                 path: self.wal_log_path.clone(),
-                kind: WalErrorKind::WalFileCorrupted(io::Error::new(io::ErrorKind::InvalidData, "Invalid entry data key/value")),
+                kind: WalErrorKind::WalFileCorrupted(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid entry data key/value",
+                )),
             }));
         }
 
         let mut crc32c_checksummer = IncrementalCrc32c::new();
-        crc32c_checksummer.update(&header[4..]);//skip crc32c data in header
+        crc32c_checksummer.update(&header[4..]); //skip crc32c data in header
         crc32c_checksummer.update(&key_value_data);
-        let computed_crc32c=crc32c_checksummer.finalize();
-        if computed_crc32c!=crc32c {
+        let computed_crc32c = crc32c_checksummer.finalize();
+        if computed_crc32c != crc32c {
             self.finished = true;
             return Some(Err(WalError {
                 path: self.wal_log_path.clone(),
-                kind: WalErrorKind::WalFileCorrupted(io::Error::new(io::ErrorKind::InvalidData, "CRC32 checksum mismatch")),
+                kind: WalErrorKind::WalFileCorrupted(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "CRC32 checksum mismatch",
+                )),
             }));
         }
 
@@ -172,13 +194,7 @@ impl Iterator for WalEntryIterator {
         let key = key_value_data;
 
         Some(Ok(WalEntry::new(
-            crc32c,
-            sequence,
-            entry_type,
-            key_size,
-            value_size,
-            key,
-            value,
+            crc32c, sequence, entry_type, key_size, value_size, key, value,
         )))
     }
 }
@@ -191,7 +207,7 @@ pub struct WalError {
 
 impl Display for WalError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "error reading `{}`", self.path.display())
+        write!(f, "error reading `{}` {:?}", self.path.display(), self.kind)
     }
 }
 
@@ -211,5 +227,6 @@ pub enum WalErrorKind {
     WalFileCorrupted(io::Error),
     WalFileError(io::Error),
     WalFileDoesntExist,
+    ChannelDisconnected(SendError<WriteRequest>),
     WriterThreadDisconnected,
 }
