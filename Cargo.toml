@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytes = "1.10.1"
+log = "0.4.28"
+env_logger= "0.11.8"
 
 [dev-dependencies]
-criterion = "0.5"
-tempfile = "3.21.0"
-rand = "0.8"
+criterion = "0.8.0"
+tempfile = "3.23.0"
+rand = "0.8.5"
 
 [[bench]]
 name = "crc32c_bench"

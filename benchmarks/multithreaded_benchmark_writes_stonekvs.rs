@@ -1,13 +1,14 @@
 #![cfg(target_os = "linux")]
 use rand::Rng;
-use rocksdb::{Options, WriteOptions, DB};
+use rocksdb::{DB, Options, WriteOptions};
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Barrier};
+use std::sync::{Once, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use stone_kvs::wal::{ChannelWal, Wal, WalConfig};
@@ -98,6 +99,24 @@ fn get_linux_memory_info() -> (u64, u64, f64) {
     (total_memory, dirty_pages, dirty_ratio)
 }
 
+static INIT: Once = Once::new();
+
+fn init_test_logger() {
+    INIT.call_once(|| {
+        let log_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open("test_thread_bench.log")
+            .expect("Failed to open log file");
+
+        env_logger::Builder::new()
+            .target(env_logger::Target::Pipe(Box::new(log_file)))
+            .filter_level(log::LevelFilter::Debug)
+            .init();
+    });
+}
+
 #[derive(Clone)]
 enum RocksdbFsyncMode {
     SyncEach,
@@ -176,16 +195,17 @@ fn parse_duration_string(duration_str: &str) -> Option<Duration> {
             .ok()
             .map(|hours| Duration::from_secs(hours * 3600))
     } else {
-        duration_str
-            .parse::<u64>()
-            .ok()
-            .map(Duration::from_secs)
+        duration_str.parse::<u64>().ok().map(Duration::from_secs)
     }
 }
 
 fn print_usage() {
-    println!("Usage: WALRUS_FSYNC=<schedule> WALRUS_DURATION=<duration> cargo test stonekvs_multithreaded_benchmark_writes");
-    println!("   or: cargo test stonekvs_multithreaded_benchmark_writes -- --fsync <schedule> --duration <duration>");
+    println!(
+        "Usage: WALRUS_FSYNC=<schedule> WALRUS_DURATION=<duration> cargo test stonekvs_multithreaded_benchmark_writes"
+    );
+    println!(
+        "   or: cargo test stonekvs_multithreaded_benchmark_writes -- --fsync <schedule> --duration <duration>"
+    );
     println!();
     println!("Fsync Schedule Options:");
     println!("  sync-each    Sync WAL on every write (most durable)");
@@ -202,9 +222,15 @@ fn print_usage() {
     println!("  Default: 2m (120 seconds)");
     println!();
     println!("Examples:");
-    println!("  WALRUS_FSYNC=sync-each WALRUS_DURATION=30s cargo test stonekvs_multithreaded_benchmark_writes");
-    println!("  WALRUS_FSYNC=no-fsync WALRUS_DURATION=1m cargo test stonekvs_multithreaded_benchmark_writes");
-    println!("  WALRUS_FSYNC=500ms WALRUS_DURATION=5m cargo test stonekvs_multithreaded_benchmark_writes");
+    println!(
+        "  WALRUS_FSYNC=sync-each WALRUS_DURATION=30s cargo test stonekvs_multithreaded_benchmark_writes"
+    );
+    println!(
+        "  WALRUS_FSYNC=no-fsync WALRUS_DURATION=1m cargo test stonekvs_multithreaded_benchmark_writes"
+    );
+    println!(
+        "  WALRUS_FSYNC=500ms WALRUS_DURATION=5m cargo test stonekvs_multithreaded_benchmark_writes"
+    );
     println!("  cargo test stonekvs_multithreaded_benchmark_writes -- --fsync async --duration 1m");
 }
 
@@ -215,6 +241,8 @@ fn cleanup_path(path: &str) {
 
 #[test]
 fn stonekvs_multithreaded_benchmark() {
+    init_test_logger();
+    log::info!("stonekvs_multithreaded_benchmark");
     let args: Vec<String> = env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_usage();
@@ -231,7 +259,6 @@ fn stonekvs_multithreaded_benchmark() {
     let write_duration = parse_duration();
 
     #[cfg(target_os = "linux")]
-
     let config = WalConfig::new(PathBuf::from(wal_path.clone()));
 
     let wal = Arc::new(ChannelWal::open(config).unwrap());
@@ -253,9 +280,7 @@ fn stonekvs_multithreaded_benchmark() {
     let start_barrier = Arc::new(Barrier::new(num_threads + 1));
     let write_end_barrier = Arc::new(Barrier::new(num_threads + 1));
 
-    let topics: Vec<String> = (0..num_threads)
-        .map(|i| format!("topic_{}", i))
-        .collect();
+    let topics: Vec<String> = (0..num_threads).map(|i| format!("topic_{}", i)).collect();
 
     println!("=== Multi-threaded StoneKVS WAL Benchmark ===");
     println!(
@@ -360,7 +385,6 @@ fn stonekvs_multithreaded_benchmark() {
 
     let wal_sync_stop = Arc::new(AtomicBool::new(false));
 
-
     let mut handles = Vec::new();
     for thread_id in 0..num_threads {
         let db_clone = Arc::clone(&wal);
@@ -385,7 +409,6 @@ fn stonekvs_multithreaded_benchmark() {
             let batch_delay = Duration::from_millis(500);
             let mut batch_number = 0;
 
-
             while start_time.elapsed() < write_duration {
                 let current_batch_size = match batch_number {
                     0 => 50_000,
@@ -406,11 +429,11 @@ fn stonekvs_multithreaded_benchmark() {
                     }
 
                     let size = rng.gen_range(500..=1024);
-                    let data = vec![((counter % 256)+1024) as u8; size];
+                    let data = vec![((counter % 256) + 1024) as u8; size];
                     let key = format!("{}:{}", topic, counter);
 
                     match db_clone.write_entry(key.as_bytes().to_vec(), data) {
-                        Ok((_,_,dataout)) => {
+                        Ok((_, _, dataout)) => {
                             local_writes += 1;
                             local_write_bytes += dataout.len() as u64;
                             total_writes_clone.fetch_add(1, Ordering::Relaxed);
@@ -418,10 +441,7 @@ fn stonekvs_multithreaded_benchmark() {
                                 .fetch_add(dataout.len() as u64, Ordering::Relaxed);
                         }
                         Err(err) => {
-                            eprintln!(
-                                "Thread {} put error: {} (topic {})",
-                                thread_id, err, topic
-                            );
+                            eprintln!("Thread {} put error: {} (topic {})", thread_id, err, topic);
                             local_errors += 1;
                         }
                     }
@@ -489,7 +509,6 @@ fn stonekvs_multithreaded_benchmark() {
     if let Err(err) = monitor_handle.join() {
         eprintln!("Monitor thread terminated with error: {:?}", err);
     }
-
 
     let total_elapsed = benchmark_start.elapsed();
     println!("\n=== Final Summary ===");

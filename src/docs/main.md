@@ -28,3 +28,8 @@ and you're done.
 These are the two referencing for modelling Rust error in this project
 - https://www.shuttle.dev/blog/2022/06/30/error-handling
 - https://sabrinajewson.org/blog/errors
+
+## WAL
+I tried the channel implementation that peaks to 80MB/s doing nothing
+I tried the sync implementation that peaks to 45MB7s doing nothing
+The rocksdb implementation peaks at 220MB/s writing to disk.... it's a huge difference

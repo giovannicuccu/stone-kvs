@@ -1,17 +1,17 @@
 #![cfg(target_os = "linux")]
-
-mod multithreaded_benchmark_writes_stonekvs_sync;
-
 use rand::Rng;
 use rocksdb::{DB, Options, WriteOptions};
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Barrier};
+use std::sync::{Once, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+use stone_kvs::wal::{ChannelWal, SyncWal, Wal, WalConfig};
 
 fn get_memory_info() -> (u64, u64, f64) {
     #[cfg(target_os = "macos")]
@@ -99,6 +99,24 @@ fn get_linux_memory_info() -> (u64, u64, f64) {
     (total_memory, dirty_pages, dirty_ratio)
 }
 
+static INIT: Once = Once::new();
+
+fn init_test_logger() {
+    INIT.call_once(|| {
+        let log_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open("test_thread_bench.log")
+            .expect("Failed to open log file");
+
+        env_logger::Builder::new()
+            .target(env_logger::Target::Pipe(Box::new(log_file)))
+            .filter_level(log::LevelFilter::Debug)
+            .init();
+    });
+}
+
 #[derive(Clone)]
 enum RocksdbFsyncMode {
     SyncEach,
@@ -183,10 +201,10 @@ fn parse_duration_string(duration_str: &str) -> Option<Duration> {
 
 fn print_usage() {
     println!(
-        "Usage: WALRUS_FSYNC=<schedule> WALRUS_DURATION=<duration> cargo test rocksdb_multithreaded_benchmark_writes"
+        "Usage: WALRUS_FSYNC=<schedule> WALRUS_DURATION=<duration> cargo test stonekvs_multithreaded_benchmark_writes_sync"
     );
     println!(
-        "   or: cargo test rocksdb_multithreaded_benchmark_writes -- --fsync <schedule> --duration <duration>"
+        "   or: cargo test stonekvs_multithreaded_benchmark_writes_sync -- --fsync <schedule> --duration <duration>"
     );
     println!();
     println!("Fsync Schedule Options:");
@@ -205,15 +223,15 @@ fn print_usage() {
     println!();
     println!("Examples:");
     println!(
-        "  WALRUS_FSYNC=sync-each WALRUS_DURATION=30s cargo test rocksdb_multithreaded_benchmark_writes"
+        "  WALRUS_FSYNC=sync-each WALRUS_DURATION=30s cargo test stonekvs_multithreaded_benchmark_writes"
     );
     println!(
-        "  WALRUS_FSYNC=no-fsync WALRUS_DURATION=1m cargo test rocksdb_multithreaded_benchmark_writes"
+        "  WALRUS_FSYNC=no-fsync WALRUS_DURATION=1m cargo test stonekvs_multithreaded_benchmark_writes"
     );
     println!(
-        "  WALRUS_FSYNC=500ms WALRUS_DURATION=5m cargo test rocksdb_multithreaded_benchmark_writes"
+        "  WALRUS_FSYNC=500ms WALRUS_DURATION=5m cargo test stonekvs_multithreaded_benchmark_writes"
     );
-    println!("  cargo test rocksdb_multithreaded_benchmark_writes -- --fsync async --duration 1m");
+    println!("  cargo test stonekvs_multithreaded_benchmark_writes -- --fsync async --duration 1m");
 }
 
 fn cleanup_path(path: &str) {
@@ -222,14 +240,16 @@ fn cleanup_path(path: &str) {
 }
 
 #[test]
-fn rocksdb_multithreaded_benchmark() {
+fn stonekvs_sync_multithreaded_benchmark() {
+    init_test_logger();
+    log::info!("stonekvs_sync_multithreaded_benchmark");
     let args: Vec<String> = env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_usage();
         return;
     }
 
-    let db_path = "rocksdb_benchmark_db";
+    let db_path = "stonekvs_sync_benchmark_db";
     let wal_path = format!("{}/wal", db_path);
     cleanup_path(db_path);
 
@@ -239,20 +259,16 @@ fn rocksdb_multithreaded_benchmark() {
     let write_duration = parse_duration();
 
     #[cfg(target_os = "linux")]
-    let mut options = Options::default();
-    options.create_if_missing(true);
-    options.set_wal_dir(&wal_path);
-    options.set_keep_log_file_num(10);
-    options.optimize_level_style_compaction(16 * 1024 * 1024 * 1024); // this should be enough to never flush the memtable and have a fair benchmark
+    let config = WalConfig::new(PathBuf::from(wal_path.clone()));
 
-    let db = Arc::new(DB::open(&options, db_path).expect("Failed to open RocksDB"));
+    let wal = Arc::new(SyncWal::open(config).unwrap());
 
     let num_threads = 10;
     let total_writes = Arc::new(AtomicU64::new(0));
     let total_write_bytes = Arc::new(AtomicU64::new(0));
     let write_errors = Arc::new(AtomicU64::new(0));
 
-    let csv_path = "rocksdb_benchmark_throughput.csv";
+    let csv_path = "stonekvs_benchmark_throughput.csv";
     let mut csv_file = fs::File::create(csv_path).expect("Failed to create CSV file");
     writeln!(
         csv_file,
@@ -266,24 +282,13 @@ fn rocksdb_multithreaded_benchmark() {
 
     let topics: Vec<String> = (0..num_threads).map(|i| format!("topic_{}", i)).collect();
 
-    println!("=== Multi-threaded RocksDB WAL Benchmark ===");
+    println!("=== Multi-threaded StoneKVS WAL Benchmark ===");
     println!(
         "Configuration: {} threads, {:.0}s write phase only",
         num_threads,
         write_duration.as_secs()
     );
-    let fsync_mode_label = match &fsync_mode {
-        RocksdbFsyncMode::SyncEach => "sync-each".to_string(),
-        RocksdbFsyncMode::NoFsync => "no-fsync".to_string(),
-        RocksdbFsyncMode::Async(d) => {
-            if *d == Duration::from_millis(1000) {
-                "async (1000ms)".to_string()
-            } else {
-                format!("async ({}ms)", d.as_millis())
-            }
-        }
-    };
-    println!("Fsync mode: {}", fsync_mode_label);
+
     println!("Duration: {:?}", write_duration);
 
     let total_writes_monitor = Arc::clone(&total_writes);
@@ -294,7 +299,7 @@ fn rocksdb_multithreaded_benchmark() {
         let mut csv_file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("rocksdb_benchmark_throughput.csv")
+            .open(csv_path)
             .expect("Failed to open CSV file");
 
         let mut last_writes = 0u64;
@@ -379,25 +384,10 @@ fn rocksdb_multithreaded_benchmark() {
     });
 
     let wal_sync_stop = Arc::new(AtomicBool::new(false));
-    let wal_sync_handle = if let RocksdbFsyncMode::Async(interval) = fsync_mode.clone() {
-        let db_clone = Arc::clone(&db);
-        let stop_flag = Arc::clone(&wal_sync_stop);
-        Some(thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) {
-                thread::sleep(interval);
-                if let Err(err) = db_clone.flush_wal(true) {
-                    eprintln!("Error flushing WAL: {}", err);
-                }
-            }
-            let _ = db_clone.flush_wal(true);
-        }))
-    } else {
-        None
-    };
 
     let mut handles = Vec::new();
     for thread_id in 0..num_threads {
-        let db_clone = Arc::clone(&db);
+        let db_clone = Arc::clone(&wal);
         let total_writes_clone = Arc::clone(&total_writes);
         let total_write_bytes_clone = Arc::clone(&total_write_bytes);
         let write_errors_clone = Arc::clone(&write_errors);
@@ -418,14 +408,6 @@ fn rocksdb_multithreaded_benchmark() {
             let mut rng = rand::thread_rng();
             let batch_delay = Duration::from_millis(500);
             let mut batch_number = 0;
-
-            let mut write_opts = WriteOptions::default();
-            write_opts.disable_wal(false);
-            if let RocksdbFsyncMode::SyncEach = fsync_mode_clone {
-                write_opts.set_sync(true);
-            } else {
-                write_opts.set_sync(false);
-            }
 
             while start_time.elapsed() < write_duration {
                 let current_batch_size = match batch_number {
@@ -450,7 +432,7 @@ fn rocksdb_multithreaded_benchmark() {
                     let data = vec![((counter % 256) + 1024) as u8; size];
                     let key = format!("{}:{}", topic, counter);
 
-                    match db_clone.put_opt(key.as_bytes(), data.as_slice(), &write_opts) {
+                    match db_clone.write_entry(key.as_bytes(), &data) {
                         Ok(_) => {
                             local_writes += 1;
                             local_write_bytes += data.len() as u64;
@@ -522,22 +504,9 @@ fn rocksdb_multithreaded_benchmark() {
     }
 
     wal_sync_stop.store(true, Ordering::Relaxed);
-    if let Some(handle) = wal_sync_handle {
-        let _ = handle.join();
-    }
 
     if let Err(err) = monitor_handle.join() {
         eprintln!("Monitor thread terminated with error: {:?}", err);
-    }
-
-    if let RocksdbFsyncMode::SyncEach = fsync_mode {
-        if let Err(err) = db.flush_wal(true) {
-            eprintln!("Error during final WAL flush: {}", err);
-        }
-    } else if let RocksdbFsyncMode::Async(_) = fsync_mode {
-        if let Err(err) = db.flush_wal(true) {
-            eprintln!("Error during final WAL flush: {}", err);
-        }
     }
 
     let total_elapsed = benchmark_start.elapsed();
@@ -556,8 +525,8 @@ fn rocksdb_multithreaded_benchmark() {
         final_writes
     );
 
-    println!("RocksDB multi-threaded benchmark completed successfully!");
+    println!("StoneKVS multi-threaded benchmark completed successfully!");
 
-    drop(db);
+    drop(wal);
     cleanup_path(db_path);
 }

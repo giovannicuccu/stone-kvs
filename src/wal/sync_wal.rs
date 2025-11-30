@@ -1,9 +1,9 @@
+use crate::wal::crc32c::IncrementalCrc32c;
+use crate::wal::wal_commons::*;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::RwLock;
-use crate::wal::crc32c::IncrementalCrc32c;
-use crate::wal::wal_commons::*;
 
 pub(crate) struct WalStatus {
     sequence: u64,
@@ -26,11 +26,10 @@ impl SyncWal {
         }
 
         let wal_dir = config.path.join("wal");
-        std::fs::create_dir_all(&wal_dir)
-            .map_err(|e| WalError {
-                path: config.path.clone(),
-                kind: WalErrorKind::CannotCreateWalDirectory(e),
-            })?;
+        std::fs::create_dir_all(&wal_dir).map_err(|e| WalError {
+            path: config.path.clone(),
+            kind: WalErrorKind::CannotCreateWalDirectory(e),
+        })?;
 
         let wal_log_path = wal_dir.join("wal.log");
 
@@ -46,11 +45,10 @@ impl SyncWal {
                 })?
         } else {
             // Create new file and write header
-            let mut file = File::create(&wal_log_path)
-                .map_err(|e| WalError {
-                    path: config.path.clone(),
-                    kind: WalErrorKind::WalFileError(e),
-                })?;
+            let mut file = File::create(&wal_log_path).map_err(|e| WalError {
+                path: config.path.clone(),
+                kind: WalErrorKind::WalFileError(e),
+            })?;
 
             // Write WAL file header: [Magic(4B) | Version(4B) | Reserved(8B)]
             file.write_all(WAL_MAGIC)
@@ -64,10 +62,12 @@ impl SyncWal {
             file
         };
 
-        Ok(Self { config, wal_status: RwLock::new(WalStatus { sequence: 0, file }), wal_log_path })
+        Ok(Self {
+            config,
+            wal_status: RwLock::new(WalStatus { sequence: 0, file }),
+            wal_log_path,
+        })
     }
-
-
 
     pub fn log_path(&self) -> &PathBuf {
         &self.wal_log_path
@@ -77,9 +77,10 @@ impl SyncWal {
 impl super::Wal for SyncWal {
     fn write_entry(&self, key: &[u8], value: &[u8]) -> Result<u64, WalError> {
         let mut status = self.wal_status.write().unwrap();
-        status.sequence += 1;
+        //status.sequence += 1;
+        //let sequence = 1u64;
         let sequence_bytes = status.sequence.to_le_bytes();
-
+        //let sequence_bytes = 1u64.to_le_bytes();
         // Helper to convert io::Error to WalError
         let map_err = |e| map_io_error(&self.wal_log_path, e);
 
@@ -96,16 +97,26 @@ impl super::Wal for SyncWal {
         crc32c.update(value);
         let crc32c_value = crc32c.finalize();
 
-        status.file.write_all(&crc32c_value.to_le_bytes()).map_err(map_err)?;
+        status
+            .file
+            .write_all(&crc32c_value.to_le_bytes())
+            .map_err(map_err)?;
         status.file.write_all(&sequence_bytes).map_err(map_err)?;
         status.file.write(&[PUT_OPERATION]).map_err(map_err)?;
-        status.file.write_all(&key_size.to_le_bytes()).map_err(map_err)?;
-        status.file.write_all(&value_size.to_le_bytes()).map_err(map_err)?;
+        status
+            .file
+            .write_all(&key_size.to_le_bytes())
+            .map_err(map_err)?;
+        status
+            .file
+            .write_all(&value_size.to_le_bytes())
+            .map_err(map_err)?;
         status.file.write_all(key).map_err(map_err)?;
         status.file.write_all(value).map_err(map_err)?;
         status.file.flush().map_err(map_err)?;
 
         Ok(status.sequence)
+        //Ok(sequence)
     }
 
     fn entries(&self) -> Result<WalEntryIterator, WalError> {

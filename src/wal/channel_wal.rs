@@ -1,5 +1,6 @@
 use crate::wal::crc32c::IncrementalCrc32c;
 use crate::wal::wal_commons::*;
+use log::error;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
@@ -11,9 +12,16 @@ use std::time::Duration;
 use std::{io, mem, thread};
 
 pub const PUT_OPERATION: u8 = 1;
-pub const BLOCK_SIZE: usize = 1024 * 32;
-const WAL_HEADER_RECORD_SIZE: usize = 7;
-const WAL_RECORD_HEADER_RECORD_SIZE: usize = 17;
+pub const BLOCK_SIZE: usize = 32768; //1024 * 32
+const WAL_CHUNK_HEADER_SIZE: usize = 7;
+const WAL_RECORD_HEADER_SIZE: usize = 17;
+const WAL_RECORD_HEADER_OPERATION_IDX: usize = 8;
+const WAL_RECORD_HEADER_VALUE_IDX: usize = 13;
+
+const CHUNK_TYPE_FULL: u8 = 1;
+const CHUNK_TYPE_FIRST: u8 = 2;
+const CHUNK_TYPE_MIDDLE: u8 = 3;
+const CHUNK_TYPE_LAST: u8 = 4;
 
 pub struct WriteRequest {
     key: Vec<u8>,
@@ -38,7 +46,18 @@ impl ChannelWal {
         //create the wal synchronously so we can crate the file and allow empty iteration
         let wal = InnerWal::open(config.clone(), sequence_clone)?;
         let writer_handle = thread::spawn(move || {
+            //if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             write_entries(receiver, wal);
+            /*})) {
+                let panic_msg = if let Some(s) = e.downcast_ref::<&str>() {
+                    format!("WAL writer thread panicked!\nPanic message: {}", s)
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    format!("WAL writer thread panicked!\nPanic message: {}", s)
+                } else {
+                    "WAL writer thread panicked!\nPanic message: <unknown>".to_string()
+                };
+                error!("Panic caught: {}", panic_msg);
+            }*/
         });
 
         Ok(Self {
@@ -98,6 +117,7 @@ fn write_entries(receiver: Receiver<WriteRequest>, mut wal: InnerWal) {
                 response_tx,
             }) = receiver.recv_timeout(timeout_millis)
         {
+            log::info!("writing_entry to wal");
             let result = wal.write_entry(key, value);
             counter = counter + 1;
             response_holder.push((response_tx, result));
@@ -187,7 +207,7 @@ impl InnerWal {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
 
         // Helper to convert io::Error to WalError
-        let map_err = |e| map_io_error(&self.wal_log_path, e);
+        //let map_err = |e| map_io_error(&self.wal_log_path, e);
 
         let header_data = self.build_entry_header(
             sequence,
@@ -199,19 +219,30 @@ impl InnerWal {
         let mut bytes_to_write = header_data.len() + key.len() + value.len();
 
         let block_type: u8 = if bytes_to_write >= (BLOCK_SIZE - self.block_offset) {
-            2
+            CHUNK_TYPE_FIRST
         } else {
-            1
+            CHUNK_TYPE_FULL
         };
 
-        let record_len =
-            bytes_to_write.min(BLOCK_SIZE - (self.block_offset + WAL_HEADER_RECORD_SIZE));
+        /*
+        INVARIANT
+        BLOCK_SIZE - (self.block_offset + WAL_CHUNK_HEADER_SIZE)>0
+        i.e. I can write the chunk header plus at least one byte of data
+        the invariant initially holds self.block_offset=0
+         */
+        let chunk_len =
+            bytes_to_write.min(BLOCK_SIZE - (self.block_offset + WAL_CHUNK_HEADER_SIZE));
         let mut crc_offset = self.block_offset;
-        self.write_chunk_header(record_len, block_type);
+        self.write_chunk_header(chunk_len, block_type);
         (bytes_to_write, crc_offset) = self.write_data(&header_data, crc_offset, bytes_to_write);
         (bytes_to_write, crc_offset) = self.write_data(&key, crc_offset, bytes_to_write);
-        (_, _) = self.write_data(&value, crc_offset, bytes_to_write);
-
+        (_, crc_offset) = self.write_data(&value, crc_offset, bytes_to_write);
+        /*
+        Restore the invariant if needed
+         */
+        if (self.block_offset + WAL_CHUNK_HEADER_SIZE) >= BLOCK_SIZE {
+            self.write_data_and_reset_block(crc_offset);
+        }
         Ok((sequence, key, value))
     }
 
@@ -221,20 +252,22 @@ impl InnerWal {
         operation: u8,
         key_len: u32,
         value_len: u32,
-    ) -> [u8; WAL_RECORD_HEADER_RECORD_SIZE] {
-        let mut header_data = [0u8; WAL_RECORD_HEADER_RECORD_SIZE];
-        header_data[0..8].copy_from_slice(&sequence.to_le_bytes());
-        header_data[8] = operation;
-        header_data[9..13].copy_from_slice(&key_len.to_le_bytes());
-        header_data[13..WAL_RECORD_HEADER_RECORD_SIZE].copy_from_slice(&value_len.to_le_bytes());
+    ) -> [u8; WAL_RECORD_HEADER_SIZE] {
+        let mut header_data = [0u8; WAL_RECORD_HEADER_SIZE];
+        header_data[0..WAL_RECORD_HEADER_OPERATION_IDX].copy_from_slice(&sequence.to_le_bytes());
+        header_data[WAL_RECORD_HEADER_OPERATION_IDX] = operation;
+        header_data[WAL_RECORD_HEADER_OPERATION_IDX + 1..WAL_RECORD_HEADER_VALUE_IDX]
+            .copy_from_slice(&key_len.to_le_bytes());
+        header_data[WAL_RECORD_HEADER_VALUE_IDX..WAL_RECORD_HEADER_SIZE]
+            .copy_from_slice(&value_len.to_le_bytes());
         header_data
     }
 
-    fn write_chunk_header(&mut self, record_len: usize, block_type: u8) {
+    fn write_chunk_header(&mut self, chunk_len: usize, block_type: u8) {
         self.block_buffer[self.block_offset + 4..self.block_offset + 6]
-            .copy_from_slice(&(record_len as u16).to_le_bytes());
+            .copy_from_slice(&(chunk_len as u16).to_le_bytes());
         self.block_buffer[self.block_offset + 6] = block_type;
-        self.block_offset += WAL_HEADER_RECORD_SIZE;
+        self.block_offset += WAL_CHUNK_HEADER_SIZE;
     }
     fn write_data(
         &mut self,
@@ -243,10 +276,14 @@ impl InnerWal {
         mut bytes_to_write: usize,
     ) -> (usize, usize) {
         let mut data_offset = 0;
-        //println!("writing len data {}", data.len());
+        // writes the data to the buffer and on file if its len exceeds the available data in the block
         while data_offset < data.len() {
-            let remaining = self.block_buffer.len() - self.block_offset;
-            if remaining > 0 && data_offset < data.len() {
+            /*
+            INVARIANT
+            BLOCK_SIZE - self.block_offset > 0
+             */
+            let remaining = BLOCK_SIZE - self.block_offset;
+            if remaining > 0 {
                 let to_copy = (data.len() - data_offset).min(remaining);
                 self.block_buffer[self.block_offset..self.block_offset + to_copy]
                     .copy_from_slice(&data[data_offset..data_offset + to_copy]);
@@ -255,31 +292,34 @@ impl InnerWal {
                 self.block_offset += to_copy;
                 data_offset += to_copy;
                 bytes_to_write -= to_copy;
-            }
-            if remaining == 0 {
-                self.write_data_and_re_init_block(crc_offset, bytes_to_write);
+            } else {
+                //Keep the invariant if needed
+                self.write_data_and_re_init_chunk(crc_offset, bytes_to_write);
                 crc_offset = self.block_offset;
             }
         }
         (bytes_to_write, crc_offset)
     }
 
-    fn write_data_and_re_init_block(&mut self, crc_offset: usize, bytes_to_write: usize) {
+    fn write_data_and_re_init_chunk(&mut self, crc_offset: usize, bytes_to_write: usize) {
+        self.write_data_and_reset_block(crc_offset);
+        let block_type = if bytes_to_write >= (BLOCK_SIZE - WAL_CHUNK_HEADER_SIZE) {
+            CHUNK_TYPE_MIDDLE
+        } else {
+            CHUNK_TYPE_LAST
+        };
+        let record_len =
+            bytes_to_write.min(BLOCK_SIZE - (self.block_offset + WAL_CHUNK_HEADER_SIZE));
+        self.write_chunk_header(record_len, block_type);
+    }
+
+    fn write_data_and_reset_block(&mut self, crc_offset: usize) {
         let checksum = self.crc32c.value();
         self.crc32c.reset();
         self.block_buffer[crc_offset..crc_offset + 4].copy_from_slice(&checksum.to_le_bytes());
         self.file.write_all(self.block_buffer.as_ref());
         self.block_buffer.fill(0u8);
         self.block_offset = 0;
-        let block_type = if bytes_to_write >= (BLOCK_SIZE - WAL_HEADER_RECORD_SIZE) {
-            3
-        } else {
-            4
-        };
-        let record_len =
-            bytes_to_write.min(BLOCK_SIZE - (self.block_offset + WAL_HEADER_RECORD_SIZE));
-        self.write_chunk_header(record_len, block_type);
-        //crc_offset = self.block_offset;
     }
 
     fn commit(&mut self) -> Result<(), WalError> {
@@ -293,7 +333,6 @@ impl InnerWal {
         self.file
             .seek(SeekFrom::Current(-(BLOCK_SIZE as i64)))
             .map_err(map_err)?;
-        //self.file.sync_all().map_err(map_err)?;
 
         Ok(())
     }
@@ -367,7 +406,6 @@ impl ChannelWalEntryIterator {
                 data[data_read..data_read + to_copy].copy_from_slice(
                     &self.block_buffer[self.block_offset..self.block_offset + to_copy],
                 );
-                //crc32c.update(&data[data_read..data_read + to_copy]);
                 self.block_offset += to_copy;
                 chunk_status.chunk_offset += to_copy as u16;
                 data_read += to_copy;
@@ -385,12 +423,9 @@ impl ChannelWalEntryIterator {
 
     fn read_entry_header(&self, header_data: Vec<u8>) -> (u64, u8, u32, u32) {
         let entry_sequence = u64::from_le_bytes(header_data[0..8].try_into().unwrap());
-        //println!("entry_sequence {}", entry_sequence);
         let operation = header_data[8];
         let key_len = u32::from_le_bytes(header_data[9..13].try_into().unwrap());
-        //println!("key_len {}", key_len);
         let value_len = u32::from_le_bytes(header_data[13..17].try_into().unwrap());
-        //println!("value_len {}", value_len);
         (entry_sequence, operation, key_len, value_len)
     }
 }
@@ -417,7 +452,7 @@ fn read_chunk_header(
             chunk_type,
             chunk_offset: 0,
         },
-        block_offset + WAL_HEADER_RECORD_SIZE,
+        block_offset + WAL_CHUNK_HEADER_SIZE,
     )
 }
 
@@ -428,6 +463,12 @@ impl Iterator for ChannelWalEntryIterator {
         if self.finished {
             return None;
         }
+        /*
+        INVARIANT
+        BLOCK_SIZE - (self.block_offset + WAL_CHUNK_HEADER_SIZE)>0
+        i.e. It's possible to read the chunk header at the current block_offset
+        the invariant initially holds self.block_offset=0
+         */
         let (mut chunk_status, block_offset) =
             read_chunk_header(&self.block_buffer, self.block_offset);
 
@@ -437,13 +478,20 @@ impl Iterator for ChannelWalEntryIterator {
             return None;
         }
         let header_data = self
-            .read_data(WAL_RECORD_HEADER_RECORD_SIZE, &mut chunk_status)
+            .read_data(WAL_RECORD_HEADER_SIZE, &mut chunk_status)
             .unwrap();
         let (entry_sequence, operation, key_len, value_len) = self.read_entry_header(header_data);
         let key = self.read_data(key_len as usize, &mut chunk_status).unwrap();
         let value = self
             .read_data(value_len as usize, &mut chunk_status)
             .unwrap();
+        /*
+        restore the invariant if needed
+         */
+        if (self.block_offset + WAL_CHUNK_HEADER_SIZE) >= BLOCK_SIZE {
+            self.file.read_exact(self.block_buffer.as_mut());
+            self.block_offset = 0;
+        }
         Some(Ok(WalEntry::new(
             0,
             entry_sequence,
