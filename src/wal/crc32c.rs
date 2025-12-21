@@ -161,35 +161,33 @@ pub fn crc32c_table(data: &[u8]) -> u32 {
 
 // Pre-computed 8 CRC32C lookup tables for slicing-by-8
 
-
 /// CRC32C implementation using slicing-by-8 technique
 /// Processes 8 bytes at a time using 8 lookup tables for better performance
 pub fn crc32c_slice8(data: &[u8]) -> u32 {
     let mut crc = 0xffffffff;
-    
+
     let chunks = data.chunks_exact(8);
     let remainder = chunks.remainder();
-    
+
     for chunk in chunks {
         let [b0, b1, b2, b3, b4, b5, b6, b7] = *chunk else {
             unreachable!("chunks_exact(8) guarantees 8 bytes")
         };
-        crc ^=  u32::from_le_bytes([b0,b1,b2,b3]);
+        crc ^= u32::from_le_bytes([b0, b1, b2, b3]);
         crc = CRC32C_TABLES_8[0][b7 as usize]
             ^ CRC32C_TABLES_8[1][b6 as usize]
             ^ CRC32C_TABLES_8[2][b5 as usize]
             ^ CRC32C_TABLES_8[3][b4 as usize]
             ^ CRC32C_TABLES_8[4][(crc >> 24) as u8 as usize]
-            ^ CRC32C_TABLES_8[5][(crc >> 16)  as u8 as usize]
+            ^ CRC32C_TABLES_8[5][(crc >> 16) as u8 as usize]
             ^ CRC32C_TABLES_8[6][(crc >> 8) as u8 as usize]
-            ^ CRC32C_TABLES_8[7][crc as u8 as usize]
-        ;
+            ^ CRC32C_TABLES_8[7][crc as u8 as usize];
     }
-    
+
     for &byte in remainder {
         crc = (crc >> 8) ^ CRC32C_TABLE[((crc as u8) ^ byte) as usize];
     }
-    
+
     !crc
 }
 
@@ -203,14 +201,14 @@ pub fn crc32c(data: &[u8]) -> u32 {
             return !crc32c_hw_x86_incr(0xffffffffu32, data);
         }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         if std::arch::is_aarch64_feature_detected!("crc") {
             return !crc32c_hw_arm(0xffffffffu32, data);
         }
     }
-    
+
     // Fallback to table-based implementation
     !crc32c_sw_incr(0xffffffffu32, data)
 }
@@ -265,7 +263,6 @@ fn crc32c_hw_arm_incr(mut crc: u32, data: &[u8]) -> u32 {
     use std::arch::aarch64::*;
 
     unsafe {
-
         let (prefix, u64s, suffix) = data.align_to::<u64>();
 
         // Process unaligned prefix bytes
@@ -291,21 +288,50 @@ fn crc32c_hw_arm_incr(mut crc: u32, data: &[u8]) -> u32 {
 /// Processes 32 bytes at a time using 32 lookup tables for maximum performance
 pub fn crc32c_slice32(data: &[u8]) -> u32 {
     let mut crc = 0xffffffff;
-    
+
     let chunks = data.chunks_exact(32);
     let remainder = chunks.remainder();
-    
+
     for chunk in chunks {
         let [
-            b0, b1, b2, b3, b4, b5, b6, b7,
-            b8, b9, b10, b11, b12, b13, b14, b15,
-            b16, b17, b18, b19, b20, b21, b22, b23,
-            b24, b25, b26, b27, b28, b29, b30, b31
-        ] = *chunk else {
+            b0,
+            b1,
+            b2,
+            b3,
+            b4,
+            b5,
+            b6,
+            b7,
+            b8,
+            b9,
+            b10,
+            b11,
+            b12,
+            b13,
+            b14,
+            b15,
+            b16,
+            b17,
+            b18,
+            b19,
+            b20,
+            b21,
+            b22,
+            b23,
+            b24,
+            b25,
+            b26,
+            b27,
+            b28,
+            b29,
+            b30,
+            b31,
+        ] = *chunk
+        else {
             unreachable!("chunks_exact(32) guarantees 32 bytes")
         };
 
-        crc ^=  u32::from_le_bytes([b0,b1,b2,b3]);
+        crc ^= u32::from_le_bytes([b0, b1, b2, b3]);
         crc = CRC32C_TABLES_32[0][b31 as usize]
             ^ CRC32C_TABLES_32[1][b30 as usize]
             ^ CRC32C_TABLES_32[2][b29 as usize]
@@ -337,15 +363,14 @@ pub fn crc32c_slice32(data: &[u8]) -> u32 {
             ^ CRC32C_TABLES_32[28][(crc >> 24) as u8 as usize]
             ^ CRC32C_TABLES_32[29][(crc >> 16) as u8 as usize]
             ^ CRC32C_TABLES_32[30][(crc >> 8) as u8 as usize]
-            ^ CRC32C_TABLES_32[31][ crc  as u8 as usize]
-        ;
+            ^ CRC32C_TABLES_32[31][crc as u8 as usize];
     }
-    
+
     // Process remaining bytes using table-based approach
     for &byte in remainder {
         crc = (crc >> 8) ^ CRC32C_TABLE[((crc as u8) ^ byte) as usize];
     }
-    
+
     !crc
 }
 
@@ -381,21 +406,35 @@ pub fn crc32c_slice16_bt(mut buf: &[u8]) -> u32 {
     !crc
 }
 
-
-
 pub fn crc32c_sw(data: &[u8]) -> u32 {
     !crc32c_incr(0xffffffff, data)
 }
 
 /// CRC32C implementation using slicing-by-16 technique
 /// Processes 16 bytes at a time using 16 lookup tables for high performance
-pub fn crc32c_sw_incr(mut crc:u32, data: &[u8]) -> u32 {
-
+pub fn crc32c_sw_incr(mut crc: u32, data: &[u8]) -> u32 {
     let (chunks, remainder) = data.as_chunks::<16>();
 
-    for &[ b0, b1, b2, b3, b4, b5, b6, b7,
-    b8, b9, b10, b11, b12, b13, b14, b15] in chunks {
-        crc ^=  u32::from_le_bytes([b0,b1,b2,b3]);
+    for &[
+        b0,
+        b1,
+        b2,
+        b3,
+        b4,
+        b5,
+        b6,
+        b7,
+        b8,
+        b9,
+        b10,
+        b11,
+        b12,
+        b13,
+        b14,
+        b15,
+    ] in chunks
+    {
+        crc ^= u32::from_le_bytes([b0, b1, b2, b3]);
         crc = CRC32C_TABLES_16[0][b15 as usize]
             ^ CRC32C_TABLES_16[1][b14 as usize]
             ^ CRC32C_TABLES_16[2][b13 as usize]
@@ -411,8 +450,7 @@ pub fn crc32c_sw_incr(mut crc:u32, data: &[u8]) -> u32 {
             ^ CRC32C_TABLES_16[12][(crc >> 24) as u8 as usize]
             ^ CRC32C_TABLES_16[13][(crc >> 16) as u8 as usize]
             ^ CRC32C_TABLES_16[14][(crc >> 8) as u8 as usize]
-            ^ CRC32C_TABLES_16[15][ crc  as u8 as usize]
-        ;
+            ^ CRC32C_TABLES_16[15][crc as u8 as usize];
     }
 
     // Process remaining bytes using table-based approach
@@ -432,9 +470,7 @@ pub struct IncrementalCrc32c {
 impl IncrementalCrc32c {
     /// Create a new incremental CRC32C calculator
     pub fn new() -> Self {
-        Self {
-            crc: 0xffffffff,
-        }
+        Self { crc: 0xffffffff }
     }
 
     /// Update the CRC with new data
@@ -443,7 +479,7 @@ impl IncrementalCrc32c {
         if data.is_empty() {
             return;
         }
-        self.crc = crc32c_sw_incr(self.crc, data);
+        self.crc = crc32c_incr(self.crc, data);
     }
 
     /// Finalize the CRC calculation and return the result

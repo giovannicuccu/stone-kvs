@@ -5,6 +5,7 @@ mod wal_commons;
 
 // Re-export common types
 pub use channel_wal::ChannelWal;
+pub use channel_wal::InnerWal;
 pub use sync_wal::SyncWal;
 pub use wal_commons::{WalConfig, WalEntry, WalEntryIterator, WalError, WalErrorKind};
 

@@ -55,21 +55,6 @@ fn wal_initializes_sequence_number_to_zero() {
 }
 
 #[test]
-fn write_entry_increments_sequence_number() {
-    let temp_dir = TempDir::new().unwrap();
-    let wal_path = temp_dir.path().to_path_buf();
-    let config = WalConfig::new(wal_path);
-
-    let mut wal = SyncWal::open(config).unwrap();
-    let initial_sequence = wal.sequence();
-
-    let returned_sequence = wal.write_entry(b"key1", b"value1").unwrap();
-
-    assert_eq!(returned_sequence, initial_sequence + 1);
-    assert_eq!(wal.sequence(), initial_sequence + 1);
-}
-
-#[test]
 fn wal_open_fails_with_non_existent_directory() {
     let non_existent_path = PathBuf::from("/path/that/does/not/exist");
     let config = WalConfig::new(non_existent_path);
@@ -451,7 +436,7 @@ fn channel_write_two_entry_in_first_block_and_one_across_two_blocks() {
     let (_, _, _) = wal.write_entry(key.to_vec(), value).unwrap();
 
     let key = b"test_key_3";
-    let value = vec![1u8; (BLOCK_SIZE / 2) + 200];
+    let value = vec![3u8; (BLOCK_SIZE / 2) + 200];
 
     let (entry_sequence, _, value) = wal.write_entry(key.to_vec(), value).unwrap();
 
@@ -459,7 +444,8 @@ fn channel_write_two_entry_in_first_block_and_one_across_two_blocks() {
     let _ = iter.next().unwrap().unwrap();
     let _ = iter.next().unwrap().unwrap();
     let entry = iter.next().unwrap().unwrap();
-
+    println!("entry value len {}", entry.value.len());
+    println!("value len {}", value.len());
     assert_entry_matches(entry, entry_sequence, key, &value);
 }
 

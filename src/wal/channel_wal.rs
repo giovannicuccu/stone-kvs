@@ -131,7 +131,29 @@ fn write_entries(receiver: Receiver<WriteRequest>, mut wal: InnerWal) {
         counter = 0;
     }
 }
-
+///
+/// This is the wal struct responsible for writing entries to disk in the
+/// rocksdb block format
+/// there are three main concepts
+/// the entry (key/value) being added
+/// the block i.e. the data that is written to the disk
+/// the chunks i.e. the parts of the entry that fit in a block
+/// an entry can span one single chunk if its size is smaller than the block (residual) capacity
+/// an entry can span multiple block if its size exceeds the block capacity in this case the entry is split in multiple chunks
+/// more than one entry can be written in a block it their size is less than the block size
+///
+/// Some invariants:
+///
+/// Every chunk have a checksum
+/// When starting a new chunk the checksum is zero
+/// A chunk must be written to a block with its checksum
+/// A chunk cannot be allocated in a block it the (block) residual capacity is less than the chunk header size
+///
+/// An entry must span one or more chunks
+///
+/// A block must contain at least one chunk
+/// Only the whole block is written to the disk, it's the atom of data saved to the storage
+///
 pub struct InnerWal {
     config: WalConfig,
     sequence: Arc<AtomicU64>,
@@ -175,8 +197,8 @@ impl InnerWal {
                 path: config.path.clone(),
                 kind: WalErrorKind::WalFileError(e),
             })?;
-            file.flush();
-            file.sync_all();
+            //file.flush();
+            //file.sync_all();
             file
         };
 
@@ -199,7 +221,7 @@ impl InnerWal {
         &self.wal_log_path
     }
 
-    fn write_entry(
+    pub fn write_entry(
         &mut self,
         key: Vec<u8>,
         value: Vec<u8>,
@@ -238,10 +260,12 @@ impl InnerWal {
         (bytes_to_write, crc_offset) = self.write_data(&key, crc_offset, bytes_to_write);
         (_, crc_offset) = self.write_data(&value, crc_offset, bytes_to_write);
         /*
-        Restore the invariant if needed
+        Restore the invariants (chunk size vs block size and crc) if needed
          */
+        //checksum chunk invariant
+        self.finalize_checksum(crc_offset);
         if (self.block_offset + WAL_CHUNK_HEADER_SIZE) >= BLOCK_SIZE {
-            self.write_data_and_reset_block(crc_offset);
+            self.write_data_and_reset_block();
         }
         Ok((sequence, key, value))
     }
@@ -295,14 +319,16 @@ impl InnerWal {
             } else {
                 //Keep the invariant if needed
                 self.write_data_and_re_init_chunk(crc_offset, bytes_to_write);
-                crc_offset = self.block_offset;
+                crc_offset = 0;
             }
         }
         (bytes_to_write, crc_offset)
     }
 
     fn write_data_and_re_init_chunk(&mut self, crc_offset: usize, bytes_to_write: usize) {
-        self.write_data_and_reset_block(crc_offset);
+        //checksum chunk invariant
+        self.finalize_checksum(crc_offset);
+        self.write_data_and_reset_block();
         let block_type = if bytes_to_write >= (BLOCK_SIZE - WAL_CHUNK_HEADER_SIZE) {
             CHUNK_TYPE_MIDDLE
         } else {
@@ -313,13 +339,16 @@ impl InnerWal {
         self.write_chunk_header(record_len, block_type);
     }
 
-    fn write_data_and_reset_block(&mut self, crc_offset: usize) {
-        let checksum = self.crc32c.value();
-        self.crc32c.reset();
-        self.block_buffer[crc_offset..crc_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+    fn write_data_and_reset_block(&mut self) {
         self.file.write_all(self.block_buffer.as_ref());
         self.block_buffer.fill(0u8);
         self.block_offset = 0;
+    }
+
+    fn finalize_checksum(&mut self, crc_offset: usize) {
+        let checksum = self.crc32c.value();
+        self.crc32c.reset();
+        self.block_buffer[crc_offset..crc_offset + 4].copy_from_slice(&checksum.to_le_bytes());
     }
 
     fn commit(&mut self) -> Result<(), WalError> {
@@ -481,6 +510,7 @@ impl Iterator for ChannelWalEntryIterator {
             .read_data(WAL_RECORD_HEADER_SIZE, &mut chunk_status)
             .unwrap();
         let (entry_sequence, operation, key_len, value_len) = self.read_entry_header(header_data);
+        //println!("key_len: {} value_len {}", key_len, value_len);
         let key = self.read_data(key_len as usize, &mut chunk_status).unwrap();
         let value = self
             .read_data(value_len as usize, &mut chunk_status)

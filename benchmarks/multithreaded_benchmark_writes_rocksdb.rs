@@ -1,7 +1,5 @@
 #![cfg(target_os = "linux")]
 
-mod multithreaded_benchmark_writes_stonekvs_sync;
-
 use rand::Rng;
 use rocksdb::{DB, Options, WriteOptions};
 use std::env;

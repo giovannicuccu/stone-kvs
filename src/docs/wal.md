@@ -215,3 +215,5 @@ the `write_entry` returns the corresponding sequence number
 The read operation is exposed via an iterator. the iterator expose a different wal entry from the write operation since it must expose all the data written. 
 The element returned by the iterator must follow the `Record Format` defined in this document
 
+
+
