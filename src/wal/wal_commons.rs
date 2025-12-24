@@ -3,8 +3,8 @@ use crate::wal::crc32c::IncrementalCrc32c;
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::fs::File;
-use std::io::{self, Read};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::SendError;
 
@@ -15,17 +15,26 @@ pub(crate) const WAL_ENTRY_HEADER_LEN: usize = 21;
 pub(crate) const WAL_FILE_HEADER_LEN: usize = 16;
 
 /// Helper function to convert io::Error to WalError for file operations
-pub(crate) fn map_io_error(path: &PathBuf, e: io::Error) -> WalError {
+pub(crate) fn map_io_error(path: String, e: io::Error) -> WalError {
     WalError {
-        path: path.clone(),
+        storage_description: path,
         kind: WalErrorKind::WalFileError(e),
     }
+}
+
+pub trait IWalConfig: Clone + Send {
+    type Storage: Write + Read + Seek;
+
+    fn create_storage(&self) -> Result<Self::Storage, WalError>;
+    fn buffer_size(&self) -> usize;
+
+    fn storage_description(&self) -> String;
 }
 
 #[derive(Debug, Clone)]
 pub struct WalConfig {
     pub path: PathBuf,
-    pub buffer_size: usize,
+    buffer_size: usize,
 }
 
 impl WalConfig {
@@ -39,6 +48,57 @@ impl WalConfig {
     pub fn with_buffer_size(mut self, buffer_size: usize) -> Self {
         self.buffer_size = buffer_size;
         self
+    }
+}
+
+impl IWalConfig for WalConfig {
+    type Storage = File;
+
+    fn create_storage(&self) -> Result<Self::Storage, WalError> {
+        if !self.path.exists() {
+            return Err(WalError {
+                storage_description: self.storage_description(),
+                kind: WalErrorKind::ConfigPathIsNotReadable,
+            });
+        }
+
+        let wal_dir = self.path.join("wal");
+        std::fs::create_dir_all(&wal_dir).map_err(|e| WalError {
+            storage_description: self.storage_description(),
+            kind: WalErrorKind::CannotCreateWalDirectory(e),
+        })?;
+
+        let wal_log_path = wal_dir.join("wal.log");
+
+        // Create or open the WAL file
+        let file = if wal_log_path.exists() {
+            // Open existing file in append mode
+            println!("file opened {}", wal_log_path.as_os_str().to_str().unwrap());
+            OpenOptions::new()
+                .append(true)
+                .open(&wal_log_path)
+                .map_err(|e| WalError {
+                    storage_description: self.storage_description(),
+                    kind: WalErrorKind::WalFileError(e),
+                })?
+        } else {
+            let mut file = File::create(&wal_log_path).map_err(|e| WalError {
+                storage_description: self.storage_description(),
+                kind: WalErrorKind::WalFileError(e),
+            })?;
+            //file.flush();
+            //file.sync_all();
+            file
+        };
+        Ok(file)
+    }
+
+    fn buffer_size(&self) -> usize {
+        self.buffer_size
+    }
+
+    fn storage_description(&self) -> String {
+        self.path.display().to_string()
     }
 }
 
@@ -75,139 +135,19 @@ impl WalEntry {
     }
 }
 
-pub struct WalEntryIterator {
-    file: File,
-    wal_log_path: PathBuf,
-    finished: bool,
-}
-
-impl WalEntryIterator {
-    pub(crate) fn new(wal_log_path: PathBuf) -> Result<Self, WalError> {
-        if wal_log_path.exists() {
-            let file = File::open(&wal_log_path).map_err(|e| WalError {
-                path: wal_log_path.clone(),
-                kind: WalErrorKind::WalFileError(e),
-            })?;
-            Self::create_from_existing_file(file, &wal_log_path)
-        } else {
-            Err(WalError {
-                path: wal_log_path.clone(),
-                kind: WalErrorKind::WalFileDoesntExist,
-            })
-        }
-    }
-
-    fn create_from_existing_file(mut file: File, wal_log_path: &PathBuf) -> Result<Self, WalError> {
-        let mut header = [0u8; WAL_FILE_HEADER_LEN];
-        file.read_exact(&mut header).map_err(|e| WalError {
-            path: wal_log_path.clone(),
-            kind: WalErrorKind::WalFileCorrupted(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Cannot read WAL header: {}", e),
-            )),
-        })?;
-
-        Self::validate_header_file(&header).map_err(|msg| WalError {
-            path: wal_log_path.clone(),
-            kind: WalErrorKind::WalFileCorrupted(io::Error::new(io::ErrorKind::InvalidData, msg)),
-        })?;
-
-        Ok(Self {
-            file,
-            wal_log_path: wal_log_path.clone(),
-            finished: false,
-        })
-    }
-
-    fn validate_header_file(header: &[u8; WAL_FILE_HEADER_LEN]) -> Result<(), String> {
-        let (magic, rest) = header.split_at(WAL_MAGIC.len());
-        if magic != WAL_MAGIC {
-            return Err("Invalid WAL file magic number".to_string());
-        }
-
-        let version = u32::from_le_bytes(rest[0..4].try_into().unwrap());
-        if version != WAL_VERSION {
-            return Err(format!(
-                "Unsupported WAL version: {}, expected: {}",
-                version, WAL_VERSION
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl Iterator for WalEntryIterator {
-    type Item = Result<WalEntry, WalError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.finished {
-            return None;
-        }
-
-        // Read record header: [CRC32C(4B) | Sequence(8B) | Type(1B) | Key_Size(4B) | Value_Size(4B)] = 21 bytes
-        let mut header = [0u8; WAL_ENTRY_HEADER_LEN];
-        if self.file.read_exact(&mut header).is_err() {
-            self.finished = true;
-            return None;
-        }
-
-        // Decode header fields using array slicing
-        let crc32c = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-        let sequence = u64::from_le_bytes([
-            header[4], header[5], header[6], header[7], header[8], header[9], header[10],
-            header[11],
-        ]);
-        let entry_type = header[12];
-        let key_size = u32::from_le_bytes([header[13], header[14], header[15], header[16]]);
-        let value_size = u32::from_le_bytes([header[17], header[18], header[19], header[20]]);
-
-        // Read key and value in one operation
-        let total_data_size = (key_size + value_size) as usize;
-        let mut key_value_data = vec![0u8; total_data_size];
-        if self.file.read_exact(&mut key_value_data).is_err() {
-            self.finished = true;
-            return Some(Err(WalError {
-                path: self.wal_log_path.clone(),
-                kind: WalErrorKind::WalFileCorrupted(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid entry data key/value",
-                )),
-            }));
-        }
-
-        let mut crc32c_checksummer = IncrementalCrc32c::new();
-        crc32c_checksummer.update(&header[4..]); //skip crc32c data in header
-        crc32c_checksummer.update(&key_value_data);
-        let computed_crc32c = crc32c_checksummer.finalize();
-        if computed_crc32c != crc32c {
-            self.finished = true;
-            return Some(Err(WalError {
-                path: self.wal_log_path.clone(),
-                kind: WalErrorKind::WalFileCorrupted(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "CRC32 checksum mismatch",
-                )),
-            }));
-        }
-
-        let value = key_value_data.split_off(key_size as usize);
-        let key = key_value_data;
-
-        Some(Ok(WalEntry::new(
-            crc32c, sequence, entry_type, key_size, value_size, key, value,
-        )))
-    }
-}
-
 #[derive(Debug)]
 pub struct WalError {
-    pub path: PathBuf,
+    pub storage_description: String,
     pub kind: WalErrorKind,
 }
 
 impl Display for WalError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "error reading `{}` {:?}", self.path.display(), self.kind)
+        write!(
+            f,
+            "error reading `{}` {:?}",
+            self.storage_description, self.kind
+        )
     }
 }
 

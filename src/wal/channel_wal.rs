@@ -30,22 +30,24 @@ pub struct WriteRequest {
 }
 
 #[derive(Debug)]
-pub struct ChannelWal {
+pub struct ChannelWal<C: IWalConfig> {
     sender: mpsc::SyncSender<WriteRequest>,
     _writer_handle: thread::JoinHandle<()>,
     sequence: Arc<AtomicU64>,
-    config: WalConfig,
+    config: C,
 }
 
-impl ChannelWal {
-    pub fn open(config: WalConfig) -> Result<Self, WalError> {
+impl<C: IWalConfig + 'static> ChannelWal<C> {
+    pub fn open(config: C) -> Result<Self, WalError> {
         let inner_config = config.clone();
-        let (sender, receiver) = mpsc::sync_channel(config.buffer_size);
+        let (sender, receiver) = mpsc::sync_channel(config.buffer_size());
         let sequence = Arc::new(AtomicU64::new(0));
         let sequence_clone = sequence.clone();
         //create the wal synchronously so we can crate the file and allow empty iteration
-        let wal = InnerWal::open(config.clone(), sequence_clone)?;
+
+        let config_clone = config.clone();
         let writer_handle = thread::spawn(move || {
+            let wal = InnerWal::open(config_clone, sequence_clone).unwrap();
             //if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             write_entries(receiver, wal);
             /*})) {
@@ -83,20 +85,19 @@ impl ChannelWal {
                 response_tx,
             })
             .map_err(|err| WalError {
-                path: PathBuf::new(),
+                storage_description: "".to_string(),
                 kind: WalErrorKind::ChannelDisconnected(err),
             })?;
 
         // Wait for response
         response_rx.recv().map_err(|_| WalError {
-            path: PathBuf::new(),
+            storage_description: "".to_string(),
             kind: WalErrorKind::WriterThreadDisconnected,
         })?
     }
 
-    pub fn entries(&self) -> Result<ChannelWalEntryIterator, WalError> {
-        let wal_log_path = self.config.path.join("wal").join("wal.log");
-        ChannelWalEntryIterator::new(wal_log_path)
+    pub fn entries(&self) -> Result<ChannelWalEntryIterator<C>, WalError> {
+        ChannelWalEntryIterator::new(self.config.clone())
     }
 
     pub fn sequence(&self) -> u64 {
@@ -104,7 +105,7 @@ impl ChannelWal {
     }
 }
 
-fn write_entries(receiver: Receiver<WriteRequest>, mut wal: InnerWal) {
+fn write_entries<C: IWalConfig>(receiver: Receiver<WriteRequest>, mut wal: InnerWal<C>) {
     let timeout_millis = Duration::from_millis(2);
     let mut counter = 0;
 
@@ -154,59 +155,22 @@ fn write_entries(receiver: Receiver<WriteRequest>, mut wal: InnerWal) {
 /// A block must contain at least one chunk
 /// Only the whole block is written to the disk, it's the atom of data saved to the storage
 ///
-pub struct InnerWal {
-    config: WalConfig,
+pub struct InnerWal<C: IWalConfig> {
+    config: C,
     sequence: Arc<AtomicU64>,
-    file: BufWriter<File>,
-    wal_log_path: PathBuf,
+    file: C::Storage,
     block_buffer: Box<[u8; BLOCK_SIZE]>, // Safe, fast, idiomatic
     block_offset: usize,
     crc32c: IncrementalCrc32c,
 }
 
-impl InnerWal {
-    pub fn open(config: WalConfig, sequence: Arc<AtomicU64>) -> Result<Self, WalError> {
-        if !config.path.exists() {
-            return Err(WalError {
-                path: config.path.clone(),
-                kind: WalErrorKind::ConfigPathIsNotReadable,
-            });
-        }
-
-        let wal_dir = config.path.join("wal");
-        std::fs::create_dir_all(&wal_dir).map_err(|e| WalError {
-            path: config.path.clone(),
-            kind: WalErrorKind::CannotCreateWalDirectory(e),
-        })?;
-
-        let wal_log_path = wal_dir.join("wal.log");
-
-        // Create or open the WAL file
-        let file = if wal_log_path.exists() {
-            // Open existing file in append mode
-            println!("file opened {}", wal_log_path.as_os_str().to_str().unwrap());
-            OpenOptions::new()
-                .append(true)
-                .open(&wal_log_path)
-                .map_err(|e| WalError {
-                    path: config.path.clone(),
-                    kind: WalErrorKind::WalFileError(e),
-                })?
-        } else {
-            let mut file = File::create(&wal_log_path).map_err(|e| WalError {
-                path: config.path.clone(),
-                kind: WalErrorKind::WalFileError(e),
-            })?;
-            //file.flush();
-            //file.sync_all();
-            file
-        };
-
+impl<C: IWalConfig> InnerWal<C> {
+    pub fn open(config: C, sequence: Arc<AtomicU64>) -> Result<Self, WalError> {
+        let storage = config.create_storage()?;
         Ok(Self {
             config,
             sequence,
-            file: BufWriter::with_capacity(4096, file),
-            wal_log_path,
+            file: storage,
             block_buffer: Box::new([0u8; BLOCK_SIZE]),
             block_offset: 0,
             crc32c: IncrementalCrc32c::new(),
@@ -215,10 +179,6 @@ impl InnerWal {
 
     pub fn sequence(&self) -> u64 {
         self.sequence.load(Ordering::SeqCst)
-    }
-
-    pub fn log_path(&self) -> &PathBuf {
-        &self.wal_log_path
     }
 
     pub fn write_entry(
@@ -353,7 +313,7 @@ impl InnerWal {
 
     fn commit(&mut self) -> Result<(), WalError> {
         //println!("committing wal");
-        let map_err = |e| map_io_error(&self.wal_log_path, e);
+        let map_err = |e| map_io_error(self.config.storage_description(), e);
         self.file
             .write_all(self.block_buffer.as_ref())
             .map_err(map_err)?;
@@ -374,36 +334,26 @@ pub struct ChunkStatus {
     chunk_offset: u16,
 }
 
-pub struct ChannelWalEntryIterator {
-    file: File,
-    wal_log_path: PathBuf,
+pub struct ChannelWalEntryIterator<C: IWalConfig> {
+    wal_config: C,
+    storage: C::Storage,
     finished: bool,
     block_buffer: Box<[u8; BLOCK_SIZE]>, // Safe, fast, idiomatic
     block_offset: usize,
 }
 
-impl ChannelWalEntryIterator {
-    pub(crate) fn new(wal_log_path: PathBuf) -> Result<Self, WalError> {
-        if wal_log_path.exists() {
-            let file = File::open(&wal_log_path).map_err(|e| WalError {
-                path: wal_log_path.clone(),
-                kind: WalErrorKind::WalFileError(e),
-            })?;
-            Self::create_from_existing_file(file, &wal_log_path)
-        } else {
-            Err(WalError {
-                path: wal_log_path.clone(),
-                kind: WalErrorKind::WalFileDoesntExist,
-            })
-        }
+impl<C: IWalConfig> ChannelWalEntryIterator<C> {
+    pub(crate) fn new(wal_config: C) -> Result<Self, WalError> {
+        Self::create_from_storage(wal_config)
     }
 
-    fn create_from_existing_file(mut file: File, wal_log_path: &PathBuf) -> Result<Self, WalError> {
+    fn create_from_storage(wal_config: C) -> Result<Self, WalError> {
         let mut block_buffer = Box::new([0u8; BLOCK_SIZE]);
-        file.read_exact(block_buffer.as_mut());
+        let mut storage = wal_config.create_storage()?;
+        storage.read_exact(block_buffer.as_mut());
         Ok(Self {
-            file,
-            wal_log_path: wal_log_path.clone(),
+            wal_config,
+            storage,
             finished: false,
             block_buffer,
             block_offset: 0,
@@ -422,7 +372,7 @@ impl ChannelWalEntryIterator {
                     > (chunk_status.chunk_len as usize)
             {
                 return Err(WalError {
-                    path: self.wal_log_path.clone(),
+                    storage_description: self.wal_config.storage_description(),
                     kind: WalErrorKind::WalFileCorrupted(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "Data corruption: reading beyond wal entry end",
@@ -441,7 +391,7 @@ impl ChannelWalEntryIterator {
             }
 
             if BLOCK_SIZE - self.block_offset == 0 {
-                self.file.read_exact(self.block_buffer.as_mut());
+                self.storage.read_exact(self.block_buffer.as_mut());
                 let (new_chunk_status, block_offset) = read_chunk_header(&self.block_buffer, 0);
                 let _ = mem::replace(chunk_status, new_chunk_status);
                 self.block_offset = block_offset
@@ -485,7 +435,7 @@ fn read_chunk_header(
     )
 }
 
-impl Iterator for ChannelWalEntryIterator {
+impl<C: IWalConfig> Iterator for ChannelWalEntryIterator<C> {
     type Item = Result<WalEntry, WalError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -519,7 +469,7 @@ impl Iterator for ChannelWalEntryIterator {
         restore the invariant if needed
          */
         if (self.block_offset + WAL_CHUNK_HEADER_SIZE) >= BLOCK_SIZE {
-            self.file.read_exact(self.block_buffer.as_mut());
+            self.storage.read_exact(self.block_buffer.as_mut());
             self.block_offset = 0;
         }
         Some(Ok(WalEntry::new(

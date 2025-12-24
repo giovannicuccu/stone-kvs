@@ -11,7 +11,7 @@ use std::sync::{Arc, Barrier};
 use std::sync::{Once, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-use stone_kvs::wal::{ChannelWal, Wal, WalConfig};
+use stone_kvs::wal::{ChannelWal, WalConfig};
 
 fn get_memory_info() -> (u64, u64, f64) {
     #[cfg(target_os = "macos")]
