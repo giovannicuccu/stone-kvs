@@ -163,3 +163,51 @@ pub enum WalErrorKind {
     ChannelDisconnected(SendError<WriteRequest>),
     WriterThreadDisconnected,
 }
+
+pub struct NoOpStorage;
+
+impl Read for NoOpStorage {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        Ok(0)
+    }
+}
+
+impl Write for NoOpStorage {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for NoOpStorage {
+    fn seek(&mut self, _: std::io::SeekFrom) -> std::io::Result<u64> {
+        Ok(0)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NoOpWalConfig {}
+
+impl IWalConfig for NoOpWalConfig {
+    type Storage = NoOpStorage;
+
+    fn create_storage(&self) -> Result<Self::Storage, WalError> {
+        Ok(NoOpStorage {})
+    }
+
+    fn buffer_size(&self) -> usize {
+        1024 * 32
+    }
+
+    fn storage_description(&self) -> String {
+        "NoOp".to_string()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils {
+    use super::*;
+}
