@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 use rand::Rng;
-use rocksdb::{DB, Options, WriteOptions};
+use rocksdb::{Options, WriteOptions};
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;

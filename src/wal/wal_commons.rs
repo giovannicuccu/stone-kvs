@@ -1,5 +1,4 @@
 use crate::wal::channel_wal::WriteRequest;
-use crate::wal::crc32c::IncrementalCrc32c;
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -7,12 +6,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::SendError;
-
-pub(crate) const PUT_OPERATION: u8 = 1;
-pub(crate) const WAL_MAGIC: &[u8; 4] = b"WAL\0";
-pub(crate) const WAL_VERSION: u32 = 1;
-pub(crate) const WAL_ENTRY_HEADER_LEN: usize = 21;
-pub(crate) const WAL_FILE_HEADER_LEN: usize = 16;
 
 /// Helper function to convert io::Error to WalError for file operations
 pub(crate) fn map_io_error(path: String, e: io::Error) -> WalError {
@@ -82,7 +75,7 @@ impl IWalConfig for WalConfig {
                     kind: WalErrorKind::WalFileError(e),
                 })?
         } else {
-            let mut file = File::create(&wal_log_path).map_err(|e| WalError {
+            let file = File::create(&wal_log_path).map_err(|e| WalError {
                 storage_description: self.storage_description(),
                 kind: WalErrorKind::WalFileError(e),
             })?;

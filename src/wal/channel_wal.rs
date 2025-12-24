@@ -1,11 +1,7 @@
 use crate::wal::crc32c::IncrementalCrc32c;
 use crate::wal::wal_commons::*;
-use log::error;
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -350,7 +346,7 @@ impl<C: IWalConfig> ChannelWalEntryIterator<C> {
     fn create_from_storage(wal_config: C) -> Result<Self, WalError> {
         let mut block_buffer = Box::new([0u8; BLOCK_SIZE]);
         let mut storage = wal_config.create_storage()?;
-        storage.read_exact(block_buffer.as_mut());
+        let _ = storage.read_exact(block_buffer.as_mut());
         Ok(Self {
             wal_config,
             storage,
@@ -391,7 +387,7 @@ impl<C: IWalConfig> ChannelWalEntryIterator<C> {
             }
 
             if BLOCK_SIZE - self.block_offset == 0 {
-                self.storage.read_exact(self.block_buffer.as_mut());
+                let _ = self.storage.read_exact(self.block_buffer.as_mut());
                 let (new_chunk_status, block_offset) = read_chunk_header(&self.block_buffer, 0);
                 let _ = mem::replace(chunk_status, new_chunk_status);
                 self.block_offset = block_offset
@@ -469,7 +465,7 @@ impl<C: IWalConfig> Iterator for ChannelWalEntryIterator<C> {
         restore the invariant if needed
          */
         if (self.block_offset + WAL_CHUNK_HEADER_SIZE) >= BLOCK_SIZE {
-            self.storage.read_exact(self.block_buffer.as_mut());
+            let _ = self.storage.read_exact(self.block_buffer.as_mut());
             self.block_offset = 0;
         }
         Some(Ok(WalEntry::new(

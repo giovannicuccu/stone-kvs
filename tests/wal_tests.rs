@@ -1,11 +1,7 @@
 use rand::Rng;
 use std::fs::OpenOptions;
-use std::io::{Seek, Write};
-use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier, Once};
-use std::time::{Duration, Instant};
-use std::{fs, thread};
+use std::thread;
 use stone_kvs::wal::{ChannelWal, WalConfig, WalEntry};
 use tempfile::TempDir;
 
