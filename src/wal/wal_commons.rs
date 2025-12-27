@@ -1,11 +1,12 @@
 use crate::wal::channel_wal::WriteRequest;
+use crossbeam_channel::SendError;
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::SendError;
+//use std::sync::mpsc::SendError;
 
 /// Helper function to convert io::Error to WalError for file operations
 pub(crate) fn map_io_error(path: String, e: io::Error) -> WalError {
@@ -160,6 +161,7 @@ pub enum WalErrorKind {
     WalFileCorrupted(io::Error),
     WalFileError(io::Error),
     WalFileDoesntExist,
+    //ChannelDisconnected(SendError<WriteRequest>),
     ChannelDisconnected(SendError<WriteRequest>),
     WriterThreadDisconnected,
 }

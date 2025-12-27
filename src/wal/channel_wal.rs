@@ -2,7 +2,8 @@ use crate::wal::crc32c::IncrementalCrc32c;
 use crate::wal::wal_commons::*;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::Receiver;
+//use std::sync::mpsc::Receiver;
+use crossbeam_channel::{Receiver, Sender, bounded};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use std::{io, mem, thread};
@@ -20,17 +21,19 @@ const CHUNK_TYPE_MIDDLE: u8 = 3;
 const CHUNK_TYPE_LAST: u8 = 4;
 
 const DURATION_MICROS: u64 = 1;
-const BATCH_SIZE: usize = 64;
+const BATCH_SIZE: usize = 16;
 
 pub struct WriteRequest {
     key: Vec<u8>,
     value: Vec<u8>,
-    response_tx: mpsc::SyncSender<Result<(u64, Vec<u8>, Vec<u8>), WalError>>,
+    //response_tx: mpsc::SyncSender<Result<(u64, Vec<u8>, Vec<u8>), WalError>>,
+    response_tx: Sender<Result<(u64, Vec<u8>, Vec<u8>), WalError>>,
 }
 
 #[derive(Debug)]
 pub struct ChannelWal<C: IWalConfig> {
-    sender: mpsc::SyncSender<WriteRequest>,
+    //sender: mpsc::SyncSender<WriteRequest>,
+    sender: Sender<WriteRequest>,
     _writer_handle: thread::JoinHandle<()>,
     sequence: Arc<AtomicU64>,
     config: C,
@@ -39,7 +42,8 @@ pub struct ChannelWal<C: IWalConfig> {
 impl<C: IWalConfig + 'static> ChannelWal<C> {
     pub fn open(config: C) -> Result<Self, WalError> {
         let inner_config = config.clone();
-        let (sender, receiver) = mpsc::sync_channel(config.buffer_size());
+        //let (sender, receiver) = mpsc::sync_channel(config.buffer_size());
+        let (sender, receiver) = bounded(config.buffer_size());
         let sequence = Arc::new(AtomicU64::new(0));
         let sequence_clone = sequence.clone();
         //create the wal synchronously so we can crate the file and allow empty iteration
@@ -74,8 +78,8 @@ impl<C: IWalConfig + 'static> ChannelWal<C> {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<(u64, Vec<u8>, Vec<u8>), WalError> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-
+        //let (response_tx, response_rx) = mpsc::sync_channel(1);
+        let (response_tx, response_rx) = bounded(1);
         // Send request to writer thread
         self.sender
             .send(WriteRequest {
