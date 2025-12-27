@@ -12,6 +12,7 @@ test-utils = []
 [dependencies]
 log = "0.4.28"
 env_logger= "0.11.8"
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 criterion = "0.8.0"
@@ -24,6 +25,10 @@ harness = false
 
 [[bench]]
 name = "inner_wal_bench"
+harness = false
+
+[[bench]]
+name = "channel_wal_bench"
 harness = false
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

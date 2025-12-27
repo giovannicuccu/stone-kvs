@@ -19,6 +19,9 @@ const CHUNK_TYPE_FIRST: u8 = 2;
 const CHUNK_TYPE_MIDDLE: u8 = 3;
 const CHUNK_TYPE_LAST: u8 = 4;
 
+const DURATION_MICROS: u64 = 1;
+const BATCH_SIZE: usize = 64;
+
 pub struct WriteRequest {
     key: Vec<u8>,
     value: Vec<u8>,
@@ -102,12 +105,12 @@ impl<C: IWalConfig + 'static> ChannelWal<C> {
 }
 
 fn write_entries<C: IWalConfig>(receiver: Receiver<WriteRequest>, mut wal: InnerWal<C>) {
-    let timeout_millis = Duration::from_millis(2);
+    let timeout_millis = Duration::from_micros(DURATION_MICROS);
     let mut counter = 0;
 
     loop {
         let mut response_holder = vec![];
-        while counter < 10
+        while counter < BATCH_SIZE
             && let Ok(WriteRequest {
                 key,
                 value,
