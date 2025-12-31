@@ -33,3 +33,15 @@ These are the two referencing for modelling Rust error in this project
 I tried the channel implementation that peaks to 80MB/s doing nothing
 I tried the sync implementation that peaks to 45MB7s doing nothing
 The rocksdb implementation peaks at 220MB/s writing to disk.... it's a huge difference
+
+I tuned the channel_wal_implmentation using cargo bench (using NoOpStorage) and the results were astonishing
+I got a significant performance increase.
+I decided to change the mpsc implementation and I switched to crossbeam and I got enormous gains on small key/value pairs and a performance penalty
+when the data goes over 16kb. I need to dig further into this topic.
+Now 
+WALRUS_FSYNC=async WALRUS_DURATION=5s cargo test stonekvs_multithreaded_benchmark -- --no-capture
+reports 80MB/sec but it writes to disk (without fsync)
+
+Tokio has some channel structs but they are async based, I skip them for now
+
+
