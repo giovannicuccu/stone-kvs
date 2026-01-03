@@ -33,6 +33,7 @@ impl Variable {
     }
 }
 
+#[inline]
 fn from_variable_value_to_sub_components(variable_value: u64, offset_bits_size: u32) -> (u64, u64) {
     (
         variable_value >> offset_bits_size,
@@ -40,6 +41,7 @@ fn from_variable_value_to_sub_components(variable_value: u64, offset_bits_size: 
     )
 }
 
+#[inline]
 fn to_variable_value_from_sub_components(
     version: u64,
     index_offset: u64,
@@ -50,8 +52,11 @@ fn to_variable_value_from_sub_components(
 
 #[derive(Debug, PartialEq)]
 enum BlockState {
-    Done,
+    Done(u64),
     Allocated(u64),
+    NoEntry(),
+    NotAvailable(),
+    Reserved(u64),
 }
 
 struct Block<T> {
@@ -86,19 +91,57 @@ impl<T> Block<T> {
     }
 
     fn allocate_entry(&self) -> BlockState {
-        let (_, offset) =
-            from_variable_value_to_sub_components(self.allocated.load(), self.offset_bits_size);
+        let (version, offset) = self.to_sub_components(self.allocated.load());
         if (offset as usize) >= self.block_size {
-            return BlockState::Done;
+            return BlockState::Done(version);
         }
-        let (_, offset) = from_variable_value_to_sub_components(
-            self.allocated.load_and_add(1),
-            self.offset_bits_size,
-        );
+        let (version, offset) = self.to_sub_components(self.allocated.load_and_add(1));
         if (offset as usize) >= self.block_size {
-            return BlockState::Done;
+            return BlockState::Done(version);
         }
         BlockState::Allocated(offset)
+    }
+
+    fn commit_entry(&self, offset: u64, data: T) {
+        unsafe {
+            let data_ptr = self.entries.add(offset as usize);
+            data_ptr.write(MaybeUninit::new(data));
+        }
+        self.committed.load_and_add(1);
+    }
+
+    fn reserve_entry(&self) -> BlockState {
+        loop {
+            let reserved_value = self.reserved.load();
+            let (version, reserved_offset) = self.to_sub_components(reserved_value);
+            if (reserved_offset as usize) >= self.block_size {
+                return BlockState::Done(version);
+            }
+            let (_, committed_offset) = self.to_sub_components(self.committed.load());
+            if reserved_offset == committed_offset {
+                return BlockState::NoEntry();
+            }
+            if (committed_offset as usize) != self.block_size {
+                let (_, allocated_offset) = self.to_sub_components(self.allocated.load());
+                if allocated_offset != committed_offset {
+                    return BlockState::NotAvailable();
+                }
+            }
+            if self.reserved.max(reserved_value + 1) == reserved_value {
+                return BlockState::Reserved(reserved_offset);
+            }
+        }
+    }
+
+    fn consume_entry(&self, offset: u64) -> T {
+        let data = unsafe { self.entries.add(offset as usize).read().assume_init() };
+        self.consumed.load_and_add(1);
+        data
+    }
+
+    #[inline]
+    fn to_sub_components(&self, variable_value: u64) -> (u64, u64) {
+        from_variable_value_to_sub_components(variable_value, self.offset_bits_size)
     }
 }
 
@@ -141,7 +184,6 @@ impl<T> Drop for Block<T> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use env_logger::init;
 
     #[test]
     fn should_create_variable() {
@@ -261,7 +303,7 @@ mod test {
         let block: Block<Vec<u8>> = Block::init(block_size, initial_offset, offset_bits_size);
         block.allocated.load_and_add(block_size as u64 + 1);
         let block_state = block.allocate_entry();
-        assert_eq!(BlockState::Done, block_state);
+        assert_eq!(BlockState::Done(0), block_state);
     }
 
     #[test]
@@ -272,7 +314,7 @@ mod test {
         let block: Block<Vec<u8>> = Block::init(block_size, initial_offset, offset_bits_size);
         block.allocated.load_and_add(block_size as u64);
         let block_state = block.allocate_entry();
-        assert_eq!(BlockState::Done, block_state);
+        assert_eq!(BlockState::Done(0), block_state);
     }
 
     #[test]
@@ -284,5 +326,136 @@ mod test {
         block.allocated.load_and_add(block_size as u64 - 1);
         let block_state = block.allocate_entry();
         assert_eq!(BlockState::Allocated(block_size as u64 - 1), block_state);
+    }
+
+    #[test]
+    fn should_commit_an_allocated_entry() {
+        let initial_offset = 0;
+        let block_size = 16;
+        let offset_bits_size = 16;
+        let block: Block<Vec<u8>> = Block::init(block_size, initial_offset, offset_bits_size);
+        block.allocated.load_and_add(1);
+        let committed = block.committed.load();
+        let block_state = block.allocate_entry();
+        match block_state {
+            BlockState::Allocated(allocated_offset) => {
+                block.commit_entry(allocated_offset, vec![0, 1]);
+                assert_eq!(committed + 1, block.committed.load());
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn should_reserve_entry_return_done_when_reserved_is_greater_than_block_size() {
+        let initial_offset = 0;
+        let block_size = 16;
+        let offset_bits_size = 16;
+        let block: Block<Vec<u8>> = Block::init(block_size, initial_offset, offset_bits_size);
+        let version = 2;
+        block
+            .reserved
+            .load_and_add(to_variable_value_from_sub_components(
+                version,
+                block_size as u64 + 1,
+                offset_bits_size,
+            ));
+        let block_state = block.reserve_entry();
+        assert_eq!(BlockState::Done(version), block_state);
+    }
+
+    #[test]
+    fn should_reserve_entry_return_done_when_reserved_equals_to_block_size() {
+        let initial_offset = 0;
+        let block_size = 16;
+        let offset_bits_size = 16;
+        let block: Block<Vec<u8>> = Block::init(block_size, initial_offset, offset_bits_size);
+        let version = 1;
+        block
+            .reserved
+            .load_and_add(to_variable_value_from_sub_components(
+                version,
+                block_size as u64,
+                offset_bits_size,
+            ));
+        let block_state = block.reserve_entry();
+        assert_eq!(BlockState::Done(version), block_state);
+    }
+
+    #[test]
+    fn should_reserve_entry_return_no_entry_when_reserved_equals_committed() {
+        let initial_offset = 0;
+        let block_size = 16;
+        let offset_bits_size = 16;
+        let block: Block<Vec<u8>> = Block::init(block_size, initial_offset, offset_bits_size);
+        let version = 1;
+        let offset_version_value =
+            to_variable_value_from_sub_components(version, block_size as u64 - 1, offset_bits_size);
+        block.reserved.load_and_add(offset_version_value);
+        block.committed.load_and_add(offset_version_value);
+        let block_state = block.reserve_entry();
+        assert_eq!(BlockState::NoEntry(), block_state);
+    }
+
+    #[test]
+    fn should_reserve_entry_return_not_available_when_committed_does_not_equal_to_allocated() {
+        let initial_offset = 0;
+        let block_size = 16;
+        let offset_bits_size = 16;
+        let block: Block<Vec<u8>> = Block::init(block_size, initial_offset, offset_bits_size);
+        let version = 1;
+        let offset_version_value =
+            to_variable_value_from_sub_components(version, block_size as u64 - 1, offset_bits_size);
+        block.reserved.load_and_add(offset_version_value);
+        block.committed.load_and_add(offset_version_value - 1);
+        block.allocated.load_and_add(offset_version_value - 2);
+        let block_state = block.reserve_entry();
+        assert_eq!(BlockState::NotAvailable(), block_state);
+    }
+
+    #[test]
+    fn should_reserve_entry_return_reserved_when_committed_equals_to_block_size() {
+        let initial_offset = 0;
+        let block_size = 16;
+        let offset_bits_size = 16;
+        let block: Block<Vec<u8>> = Block::init(block_size, initial_offset, offset_bits_size);
+        let version = 1;
+        let variable_offset = block_size as u64 - 1;
+        let offset_version_value =
+            to_variable_value_from_sub_components(version, variable_offset, offset_bits_size);
+        block.reserved.load_and_add(offset_version_value);
+        block.committed.load_and_add(offset_version_value + 1);
+        block.allocated.load_and_add(offset_version_value - 2);
+        let block_state = block.reserve_entry();
+        assert_eq!(BlockState::Reserved(variable_offset), block_state);
+    }
+
+    #[test]
+    fn should_consume_a_reserved_entry() {
+        let initial_offset = 0;
+        let block_size = 16;
+        let offset_bits_size = 16;
+        let block: Block<Vec<u8>> = Block::init(block_size, initial_offset, offset_bits_size);
+        let block_state = block.allocate_entry();
+        match block_state {
+            BlockState::Allocated(allocated_offset) => {
+                let data = vec![0, 1];
+                let _ = block.commit_entry(allocated_offset, data.clone());
+                let reserved_state = block.reserve_entry();
+                match reserved_state {
+                    BlockState::Reserved(reserved_offset) => {
+                        let consumed_value = block.consumed.load();
+                        let data_consumed = block.consume_entry(reserved_offset);
+                        assert_eq!(data, data_consumed);
+                        assert_eq!(consumed_value + 1, block.consumed.load());
+                    }
+                    state => {
+                        println!("{:?}", state);
+                        unreachable!()
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 }
