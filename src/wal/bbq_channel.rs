@@ -3,7 +3,7 @@
     The idea is to create a channel implementation tailored to the wal needs
 */
 use crate::wal::cache_padded::CachePadded;
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 struct Variable {
@@ -67,7 +67,7 @@ struct Block<T> {
     pub(crate) consumed: Variable,
 
     block_size: usize,
-    offset_bits_size: u32,
+    pub(crate) offset_bits_size: u32,
 
     entries: *mut MaybeUninit<T>,
 }
@@ -113,6 +113,10 @@ impl<T> Block<T> {
     fn reserve_entry(&self) -> BlockState {
         loop {
             let reserved_value = self.reserved.load();
+            println!(
+                "reserve_entry reserved_value={:?}, offset_bits_size={}",
+                reserved_value, self.offset_bits_size
+            );
             let (version, reserved_offset) = self.to_sub_components(reserved_value);
             if (reserved_offset as usize) >= self.block_size {
                 return BlockState::Done(version);
@@ -177,6 +181,228 @@ impl<T> Drop for Block<T> {
                 self.entries,
                 self.block_size,
             ));
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum EnqueueState<T> {
+    Ok(),
+    Full(T),
+}
+
+#[derive(Debug, PartialEq)]
+enum DequeueState<T> {
+    Ok(T),
+    Empty(),
+}
+
+#[derive(Debug, PartialEq)]
+enum AdvanceProducerState {
+    Success(),
+    NoEntry(),
+    NotAvailable(),
+}
+
+struct Queue<T> {
+    producer_head: Variable,
+    consumer_head: Variable,
+    blocks: *mut Block<T>,
+    block_size: usize,
+    blocks_num: usize,
+    header_offset_bits_size: u32,
+}
+
+const DEFAULT_BLOCK_SIZE: usize = 4;
+impl<T> Queue<T> {
+    fn with_capacity(capacity: usize) -> Self {
+        let blocks_num = capacity / DEFAULT_BLOCK_SIZE + 1;
+        let header_offset_bits_size = u64::BITS - blocks_num.leading_zeros();
+
+        let block_offset_bits_size = u64::BITS - DEFAULT_BLOCK_SIZE.leading_zeros() + 1;
+
+        let mut blocks = Vec::with_capacity(blocks_num);
+        blocks.push(Block::init(
+            DEFAULT_BLOCK_SIZE,
+            0u64,
+            block_offset_bits_size,
+        ));
+        for _ in 1..blocks_num {
+            blocks.push(Block::init(
+                DEFAULT_BLOCK_SIZE,
+                DEFAULT_BLOCK_SIZE as u64,
+                block_offset_bits_size,
+            ));
+        }
+        unsafe { blocks.set_len(blocks_num) }
+
+        let blocks_ptr = ManuallyDrop::new(blocks).as_mut_ptr();
+
+        Self {
+            producer_head: Variable::init(0),
+            consumer_head: Variable::init(0),
+            block_size: DEFAULT_BLOCK_SIZE,
+            blocks_num,
+            blocks: blocks_ptr,
+            header_offset_bits_size,
+        }
+    }
+
+    fn enqueue(&self, data: T) -> EnqueueState<T> {
+        loop {
+            let (producer_head_value, block) = unsafe {
+                let (val, ptr) = self.get_producer_head_value_and_block();
+                (val, &mut *ptr)
+            };
+            let block_state = block.allocate_entry();
+            match block_state {
+                BlockState::Allocated(offset) => {
+                    println!("block allocated offset={}", offset);
+                    block.commit_entry(offset, data);
+                    println!("block committed");
+                    return EnqueueState::Ok();
+                }
+                BlockState::Done(version) => {
+                    let advance_producer_state = self.advance_producer_head(producer_head_value);
+                    println!("producer advanced state={:?}", advance_producer_state);
+                    match advance_producer_state {
+                        AdvanceProducerState::Success() => {}
+                        AdvanceProducerState::NoEntry() => {
+                            return EnqueueState::Full(data);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn get_producer_head_value_and_block(&self) -> (u64, *mut Block<T>) {
+        let producer_head_value = self.producer_head.load();
+        let (_, index) = from_variable_value_to_sub_components(
+            producer_head_value,
+            self.header_offset_bits_size,
+        );
+        unsafe { (producer_head_value, self.blocks.add(index as usize)) }
+    }
+
+    fn advance_producer_head(&self, producer_head_value: u64) -> AdvanceProducerState {
+        let (version, index) = from_variable_value_to_sub_components(
+            producer_head_value,
+            self.header_offset_bits_size,
+        );
+        unsafe {
+            println!(
+                "Advance producer_head_value={}, new index={}",
+                producer_head_value,
+                (index + 1) as usize % self.blocks_num
+            );
+            let new_block = self.blocks.add((index + 1) as usize % self.blocks_num);
+            let consumed_value = (*new_block).consumed.load();
+            let (consumed_version, consumed_offset) = from_variable_value_to_sub_components(
+                consumed_value,
+                (*new_block).offset_bits_size,
+            );
+            if consumed_version < version
+                || (consumed_version == version && consumed_offset != self.block_size as u64)
+            {
+                let reserved_value = (*new_block).reserved.load();
+                let (_, reserved_offset) = from_variable_value_to_sub_components(
+                    reserved_value,
+                    (*new_block).offset_bits_size,
+                );
+                return if reserved_offset == consumed_offset {
+                    AdvanceProducerState::NoEntry()
+                } else {
+                    AdvanceProducerState::NotAvailable()
+                };
+            }
+            let new_variable_value = to_variable_value_from_sub_components(
+                version + 1,
+                0,
+                (*new_block).offset_bits_size,
+            );
+            (*new_block).committed.max(new_variable_value);
+            (*new_block).allocated.max(new_variable_value);
+            self.producer_head.max(producer_head_value + 1);
+        }
+        AdvanceProducerState::Success()
+    }
+
+    fn dequeue(&self) -> DequeueState<T> {
+        loop {
+            let (consumer_head_value, block) = unsafe {
+                let (val, ptr) = self.get_consumer_head_value_and_block();
+                (val, &mut *ptr)
+            };
+            let block_state = block.reserve_entry();
+            match block_state {
+                BlockState::Reserved(offset) => {
+                    let data = block.consume_entry(offset);
+                    return DequeueState::Ok(data);
+                }
+                BlockState::Done(version) => {
+                    if !self.advance_consumer_head(consumer_head_value) {
+                        return DequeueState::Empty();
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn advance_consumer_head(&self, consumer_head_value: u64) -> bool {
+        let (version, index) = from_variable_value_to_sub_components(
+            consumer_head_value,
+            self.header_offset_bits_size,
+        );
+        println!(
+            "Advance consumer_head_value={}, new index={}",
+            consumer_head_value,
+            (index + 1) as usize % self.blocks_num
+        );
+        unsafe {
+            let new_block = self.blocks.add((index + 1) as usize % self.blocks_num);
+            let committed_value = (*new_block).committed.load();
+            let (committed_version, committed_offset) = from_variable_value_to_sub_components(
+                committed_value,
+                (*new_block).offset_bits_size,
+            );
+            let new_variable_value = to_variable_value_from_sub_components(
+                version + 1,
+                0,
+                (*new_block).offset_bits_size,
+            );
+            if committed_version != version + 1 {
+                return false;
+            }
+            (*new_block).consumed.max(new_variable_value);
+            (*new_block).reserved.max(new_variable_value);
+            self.consumer_head.max(consumer_head_value + 1);
+            true
+        }
+    }
+
+    fn get_consumer_head_value_and_block(&self) -> (u64, *mut Block<T>) {
+        let consumer_head_value = self.consumer_head.load();
+        let (_, index) = from_variable_value_to_sub_components(
+            consumer_head_value,
+            self.header_offset_bits_size,
+        );
+        println!(
+            "consumer_head_value={}, current index={}",
+            consumer_head_value, index
+        );
+        unsafe { (consumer_head_value, self.blocks.add(index as usize)) }
+    }
+}
+
+impl<T> Drop for Queue<T> {
+    fn drop(&mut self) {
+        println!("Queue drop");
+        unsafe {
+            Vec::from_raw_parts(self.blocks, self.blocks_num, self.blocks_num);
         }
     }
 }
@@ -457,5 +683,86 @@ mod test {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn should_enqueue_an_entry_when_space_available() {
+        let capacity = 10;
+        let queue = Queue::with_capacity(capacity);
+        let data: Vec<u8> = vec![0, 1];
+        let result = queue.enqueue(data);
+        assert_eq!(EnqueueState::Ok(), result);
+    }
+
+    #[test]
+    fn should_enqueue_an_entry_when_first_block_is_full() {
+        let capacity = 10;
+        let queue = Queue::with_capacity(capacity);
+        let data: Vec<u8> = vec![0, 1];
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data.clone());
+        let result = queue.enqueue(data);
+        assert_eq!(EnqueueState::Ok(), result);
+    }
+
+    #[test]
+    fn should_not_enqueue_an_entry_when_all_blocks_are_full() {
+        let capacity = 10;
+        let queue = Queue::with_capacity(capacity);
+        let data: Vec<u8> = vec![0, 1];
+        for _ in 0..12 {
+            let _ = queue.enqueue(data.clone());
+        }
+        let returned_data = data.clone();
+        let result = queue.enqueue(data);
+        assert_eq!(EnqueueState::Full(returned_data), result);
+    }
+    #[test]
+    fn should_dequeue_an_entry_when_data_available() {
+        let capacity = 10;
+        let queue = Queue::with_capacity(capacity);
+        let data: Vec<u8> = vec![0, 1];
+        let expected_data = data.clone();
+        let _ = queue.enqueue(data);
+        let dequeue_state = queue.dequeue();
+        assert_eq!(DequeueState::Ok(expected_data), dequeue_state);
+    }
+
+    #[test]
+    fn should_dequeue_an_entry_when_first_block_is_consumed() {
+        let capacity = 10;
+        let queue = Queue::with_capacity(capacity);
+        let data: Vec<u8> = vec![0, 1];
+        let expected_data = data.clone();
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data);
+        let _ = queue.dequeue();
+        let _ = queue.dequeue();
+        let _ = queue.dequeue();
+        let _ = queue.dequeue();
+        let dequeue_state = queue.dequeue();
+        assert_eq!(DequeueState::Ok(expected_data), dequeue_state);
+    }
+
+    #[test]
+    fn should_not_dequeue_an_entry_when_all_data_is_consumed() {
+        let capacity = 10;
+        let queue = Queue::with_capacity(capacity);
+        let data: Vec<u8> = vec![0, 1];
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.enqueue(data.clone());
+        let _ = queue.dequeue();
+        let _ = queue.dequeue();
+        let _ = queue.dequeue();
+        let _ = queue.dequeue();
+        let dequeue_state = queue.dequeue();
+        assert_eq!(DequeueState::Empty(), dequeue_state);
     }
 }
